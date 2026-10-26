@@ -611,9 +611,8 @@ def solve_turnstile_browser(headless=True, timeout=180):
       1) 启动 Camoufox（指纹伪装原生内置，无需扩展），带上游代理并做 geoip 对齐
       2) 等 cf-turnstile-response input 挂载（页面隐式渲染 widget，顶层无 turnstile API）
       3) 填占位表单触发 widget 激活
-      4) challenge iframe（closed shadow DOM 内）出现且完成布局后在 checkbox 位置
-         点一次 —— 只点一下，点完只轮询 token（Verifying 中重复点击会 reset 挑战，
-         表现为「刚勾上又弹回」）
+      4) 轮询 token：每 10s 未出 token 就重新点击 checkbox（最多 8 次）——
+         点击可能因坐标/布局时机落空，重试保证最终点上
       5) 检测到 "Verification failed" 终态立即放弃（多为出口 IP 信誉差）
     成功返回 token；失败抛异常交给外层重试。"""
     from camoufox.sync_api import Camoufox
@@ -672,14 +671,15 @@ def solve_turnstile_browser(headless=True, timeout=180):
         #    与点击都在下面的轮询里处理。
         page.evaluate("() => {%s}" % _FILL_JS)
 
-        # ③ challenge iframe 出现后定位 checkbox 点一次；④ 只轮询 token，绝不重复点击
-        #    （Verifying 中重复点击会 reset 挑战，表现为「刚勾上又弹回」）
-        clicked = False
+        # ③ 轮询 token；每 10s 未出 token 就重新点击 checkbox（最多 8 次）。
+        #    checkbox 中心实测在 widget 左侧约 49px（300x65 widget），点偏了不生效。
+        last_click = 0.0
+        clicks = 0
         while time.time() < deadline:
             st = _read_state(page)
             token = st.get("token") or _shadow_token(page)
             if len(token) >= 80:
-                log(f"Turnstile 通过，token 长度={len(token)}")
+                log(f"Turnstile 通过，token 长度={len(token)}（共点击 {clicks} 次）")
                 return token
             try:
                 cb = str(page.evaluate("() => String(window.__ps_token || '')") or "").strip()
@@ -689,20 +689,21 @@ def solve_turnstile_browser(headless=True, timeout=180):
             except Exception:
                 pass
 
-            if not clicked:
-                # widget 未完成布局时 bounding_box 会给 0×0，等有效尺寸再点
+            # 10s 仍无 token：上一次点击多半没落在 checkbox 上，重新定位再点。
+            # 首次点击立即执行（last_click=0）；间隔 10s 保证不在 Verifying 中重复点击。
+            if clicks < 8 and time.time() - last_click >= 10.0:
                 box = _challenge_box(page)
                 if box and box.get("width", 0) >= 100 and box.get("height", 0) >= 40:
-                    # checkbox 在 challenge iframe 左侧约 30px 处（实测 300x65 widget）
-                    x = int(box["x"] + 30)
+                    x = int(box["x"] + min(49, box["width"] * 0.2))
                     y = int(box["y"] + box["height"] / 2)
                     try:
                         page.mouse.move(x - 80, y - 60, steps=6)
                         page.mouse.move(x, y, steps=8)
                         page.wait_for_timeout(120)
                         page.mouse.click(x, y)
-                        clicked = True
-                        log(f"已点击 challenge iframe ({x},{y})，等待 token（不重复点击）")
+                        clicks += 1
+                        last_click = time.time()
+                        log(f"已点击 Turnstile checkbox ({x},{y}) 第 {clicks}/8 次")
                     except Exception as exc:
                         log(f"[!] 点击 challenge 失败: {exc}")
 
@@ -713,7 +714,7 @@ def solve_turnstile_browser(headless=True, timeout=180):
             if "verification failed" in text:
                 raise RuntimeError("Turnstile Verification failed（出口 IP 信誉可能较差）")
             page.wait_for_timeout(1000)
-        raise TimeoutError("Turnstile 求解超时（已检测到各阶段状态，token 未生成）")
+        raise TimeoutError(f"Turnstile 求解超时（已点击 {clicks} 次，token 未生成）")
 
 
 def _captcha_post(path, payload):
@@ -1176,7 +1177,6 @@ def _register_once(headless, node_file):
     email, _ = create_mailbox()                    # 失败抛异常 → 外层重试
     token = solve_turnstile(headless=headless)     # 失败抛异常 → 外层重试
     session, access_token, userdata = register(email, password, token)  # 同上
-
     verified = False
     try:
         resend_code(session, access_token)
