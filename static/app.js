@@ -30,7 +30,6 @@ const settingFields = {
     'proxy_arp_check_enabled', 'proxy_arp_probe_url', 'arp_publish_url', 'arp_publish_token',
   ],
   registration: ['proxy_enabled', 'http_proxy', 'https_proxy', 'no_proxy'],
-  mail: ['mail_provider', 'mail_type', 'mail_suffix', 'mail_domain', 'mail_api_base', 'mail_api_key', 'yyds_api_key', 'yyds_domain', 'cf_temp_base', 'cf_temp_admin_key', 'cf_temp_domain'],
   captcha: ['captcha_provider', 'captcha_timeout', 'captcha_poll_interval', 'captcha_api_base', 'captcha_api_key'],
   exports: ['export_quality_profile'],
 };
@@ -89,6 +88,18 @@ function selectMailProvider(providerId) {
   });
   renderMailProviderCards();
   if (mailState.selected === 'cloudflare_temp') loadDomainPool();
+}
+
+// 每个服务各自的字段：保存/激活/拉取/测试都只作用于当前选中的卡片。
+// 注意不含 mail_provider——「保存」只存表单不切服务，切换只由「设为当前服务」触发。
+const mailProviderFields = {
+  yunxin: ['mail_api_base', 'mail_api_key', 'mail_type', 'mail_suffix', 'mail_domain'],
+  yyds: ['yyds_api_key', 'yyds_domain'],
+  cloudflare_temp: ['cf_temp_base', 'cf_temp_admin_key', 'cf_temp_domain'],
+};
+
+function collectMailFields(providerId) {
+  return collectSettings(mailProviderFields[providerId] || []);
 }
 
 function renderFetchedDomains() {
@@ -939,17 +950,36 @@ document.getElementById('registrationSettingsForm').addEventListener('submit', e
   saveSettingsGroup(event, 'registration', settingFields.registration, '注册出网已保存');
 });
 document.getElementById('mailSettingsForm').addEventListener('submit', event => {
-  saveSettingsGroup(event, 'registration', settingFields.mail, '邮箱设置已同步');
+  event.preventDefault();
+  const provider = selectedMailProvider();
+  const label = mailProviders.find(item => item.id === provider)?.name || provider;
+  // 只保存当前卡片自己的字段，不切换当前服务
+  api('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ group: 'registration', ...collectMailFields(provider) }),
+  })
+    .then(data => {
+      fillSettings(data.settings);
+      toast(`${label} 设置已保存（当前服务未变）`);
+      refreshDashboard();
+    })
+    .catch(error => toast(error.message, true));
 });
 
 // ── 邮箱服务事件绑定 ─────────────────────────────────────
 document.getElementById('mailActivateButton')?.addEventListener('click', async event => {
   const button = event.currentTarget;
+  const provider = selectedMailProvider();
   button.disabled = true;
   try {
+    // 先保存当前卡片的表单，再激活，保证必填项与后端一致
+    await api('/api/settings', {
+      method: 'PUT',
+      body: JSON.stringify({ group: 'registration', ...collectMailFields(provider) }),
+    });
     const data = await api('/api/mail/activate', {
       method: 'POST',
-      body: JSON.stringify({ provider: selectedMailProvider() }),
+      body: JSON.stringify({ provider }),
     });
     document.getElementById('mail_provider').value = data.provider;
     renderMailProviderCards();
@@ -966,6 +996,11 @@ document.getElementById('mailFetchDomainsButton')?.addEventListener('click', asy
   const provider = selectedMailProvider();
   button.disabled = true;
   try {
+    // 拉取走后端已保存的配置：先保存当前卡片表单
+    await api('/api/settings', {
+      method: 'PUT',
+      body: JSON.stringify({ group: 'registration', ...collectMailFields(provider) }),
+    });
     const data = await api(`/api/mail/domains?provider=${encodeURIComponent(provider)}`);
     const domains = (data.domains || []).map(x => String(x).trim().toLowerCase()).filter(Boolean);
     mailState.fetchedDomains[provider] = domains;
@@ -985,11 +1020,17 @@ document.getElementById('mailFetchDomainsButton')?.addEventListener('click', asy
 
 document.getElementById('mailTestButton')?.addEventListener('click', async event => {
   const button = event.currentTarget;
+  const provider = selectedMailProvider();
   button.disabled = true;
   try {
+    // 测试用当前卡片表单里的值（先保存，测试读的是后端已存配置）
+    await api('/api/settings', {
+      method: 'PUT',
+      body: JSON.stringify({ group: 'registration', ...collectMailFields(provider) }),
+    });
     const data = await api('/api/mail/test', {
       method: 'POST',
-      body: JSON.stringify({ provider: selectedMailProvider() }),
+      body: JSON.stringify({ provider }),
     });
     toast(data.message, !data.ok);
   } catch (error) {

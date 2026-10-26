@@ -494,25 +494,41 @@ def _apply_settings(payload):
     if not group and bool(set(incoming) & set(SETTINGS_GROUPS["registration"])):
         mail_touch = captcha_touch = egress_touch = True
 
+    # 前端按服务分开提交：只有显式提交 mail_provider（切换/激活）时
+    # 才整体重写邮箱块并校验目标服务的必填项；纯字段保存只落盘提交的键。
+    mail_provider_submitted = "mail_provider" in incoming
     if mail_touch:
-        next_config["mail_provider"] = mail_provider
-        next_config["mail_api_base"] = _clean_url(merged["mail_api_base"], "邮箱 API 地址")
-        next_config["mail_api_key"] = str(merged["mail_api_key"] or "").strip()
-        next_config["mail_type"] = str(merged["mail_type"] or "mail").strip() or "mail"
-        next_config["mail_suffix"] = str(merged["mail_suffix"] or "mail.com").strip() or "mail.com"
-        next_config["mail_domain"] = str(merged["mail_domain"] or "").strip()
-        next_config["yyds_api_key"] = str(merged["yyds_api_key"] or "").strip()
-        next_config["yyds_domain"] = str(merged["yyds_domain"] or "").strip()
-        next_config["cf_temp_base"] = _clean_url(merged["cf_temp_base"], "CloudTemp API 地址")
-        next_config["cf_temp_admin_key"] = str(merged["cf_temp_admin_key"] or "").strip()
-        cf_temp_domain = str(merged["cf_temp_domain"] or "").strip().lower()
-        if cf_temp_domain == "auto":
-            cf_temp_domain = ""
-        next_config["cf_temp_domain"] = cf_temp_domain
-        if mail_provider == "yunxin" and not next_config["mail_api_base"]:
+        if mail_provider_submitted:
+            next_config["mail_provider"] = mail_provider
+        if "mail_api_base" in incoming:
+            next_config["mail_api_base"] = _clean_url(merged["mail_api_base"], "邮箱 API 地址")
+        if "mail_api_key" in incoming:
+            next_config["mail_api_key"] = str(merged["mail_api_key"] or "").strip()
+        if "mail_type" in incoming:
+            next_config["mail_type"] = str(merged["mail_type"] or "mail").strip() or "mail"
+        if "mail_suffix" in incoming:
+            next_config["mail_suffix"] = str(merged["mail_suffix"] or "mail.com").strip() or "mail.com"
+        if "mail_domain" in incoming:
+            next_config["mail_domain"] = str(merged["mail_domain"] or "").strip()
+        if "yyds_api_key" in incoming:
+            next_config["yyds_api_key"] = str(merged["yyds_api_key"] or "").strip()
+        if "yyds_domain" in incoming:
+            next_config["yyds_domain"] = str(merged["yyds_domain"] or "").strip()
+        if "cf_temp_base" in incoming:
+            next_config["cf_temp_base"] = _clean_url(merged["cf_temp_base"], "CloudTemp API 地址")
+        if "cf_temp_admin_key" in incoming:
+            next_config["cf_temp_admin_key"] = str(merged["cf_temp_admin_key"] or "").strip()
+        if "cf_temp_domain" in incoming:
+            cf_temp_domain = str(merged["cf_temp_domain"] or "").strip().lower()
+            if cf_temp_domain == "auto":
+                cf_temp_domain = ""
+            next_config["cf_temp_domain"] = cf_temp_domain
+        # 必填校验只在「写入当前服务指向」时执行；检查的是落盘后的最终值
+        final_provider = str(next_config.get("mail_provider") or "yunxin").strip().lower()
+        if mail_provider_submitted and final_provider == "yunxin" and not next_config.get("mail_api_base"):
             raise ValueError("云芯邮箱需要填写 API 地址")
-        if mail_provider == "cloudflare_temp" and (
-            not next_config["cf_temp_base"] or not next_config["cf_temp_admin_key"]
+        if mail_provider_submitted and final_provider == "cloudflare_temp" and (
+            not next_config.get("cf_temp_base") or not next_config.get("cf_temp_admin_key")
         ):
             raise ValueError("CloudTemp 需要填写 API 地址和 Admin Key")
     if captcha_touch:

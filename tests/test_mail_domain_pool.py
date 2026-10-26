@@ -197,6 +197,36 @@ class MailSettingsValidationTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.get_json()["provider"], "yyds")
 
+    def test_provider_split_save_and_activate(self):
+        """前端分服务提交：纯字段保存不动当前服务；激活只由 activate 触发。"""
+        client = self._get_client()
+        h = {"X-CSRF-Token": "t"}
+        # 只保存 YYDS 字段（全新配置）→ 不被云芯校验拦截，指向不变
+        r = client.put("/api/settings", headers=h, json={"group": "registration", "yyds_api_key": "k1"})
+        self.assertEqual(r.status_code, 200)
+        s = client.get("/api/settings").get_json()["settings"]
+        self.assertEqual(s["mail_provider"], "yunxin")
+        self.assertEqual(s["yyds_api_key"], "k1")
+        # 激活 yyds
+        r = client.post("/api/mail/activate", headers=h, json={"provider": "yyds"})
+        self.assertEqual(r.status_code, 200)
+        # 保存 CloudTemp 字段后激活 → 指向切换，且 yyds 配置保留
+        r = client.put("/api/settings", headers=h, json={
+            "group": "registration", "cf_temp_base": "https://box.example.com", "cf_temp_admin_key": "ck",
+        })
+        self.assertEqual(r.status_code, 200)
+        r = client.post("/api/mail/activate", headers=h, json={"provider": "cloudflare_temp"})
+        self.assertEqual(r.status_code, 200)
+        s = client.get("/api/settings").get_json()["settings"]
+        self.assertEqual(s["mail_provider"], "cloudflare_temp")
+        self.assertEqual(s["yyds_api_key"], "k1")
+        # 清掉 CloudTemp key → 再激活被拒，指向保留
+        client.put("/api/settings", headers=h, json={"group": "registration", "cf_temp_admin_key": ""})
+        r = client.post("/api/mail/activate", headers=h, json={"provider": "cloudflare_temp"})
+        self.assertEqual(r.status_code, 400)
+        s = client.get("/api/settings").get_json()["settings"]
+        self.assertEqual(s["mail_provider"], "cloudflare_temp")
+
     def test_activate_rejects_unknown_provider(self):
         client = self._get_client()
         r = client.post("/api/mail/activate", headers={"X-CSRF-Token": "t"}, json={"provider": "nope"})

@@ -2027,6 +2027,11 @@ td.empty-cell {
   gap: 0.95rem;
 }
 
+/* display:grid 会压过 [hidden] 的浏览器默认样式，必须显式关掉 */
+.provider-form[hidden] {
+  display: none;
+}
+
 .mail-actions {
   padding-top: 0.25rem;
 }
