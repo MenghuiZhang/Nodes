@@ -1,7 +1,14 @@
 # ProxyScrape 注册工具依赖
 requests>=2.28
-DrissionPage>=4.1     # 接管真实 Chrome 过 Turnstile（proxyscrape_register.py）
 PyJWT>=2.8            # 解析 access_token（proxyscrape_auth.py）
 curl_cffi>=0.6        # 带浏览器指纹的请求（filter_xai_proxies.py）
 Flask>=3.1,<4         # Web 控制台 API 与页面
 gunicorn>=23,<24      # Web 控制台生产服务器
+# 版本固定：camoufox 的 browser-pin.json 决定浏览器 build（0.5.8 → 156.0.1-beta.36），
+# 升级它会同时更换浏览器版本，需与 Docker 构建/离线包对齐。
+camoufox[geoip]==0.5.8  # 本地打码：Firefox 反检测内核过 Turnstile（proxyscrape_register.py）
+# 版本固定：Firefox 驱动在 Turnstile 跨域 iframe 导航提交与 frame 销毁竞态时
+# 会崩掉 Node 进程（removeChildFramesRecursively 读 undefined._getChildFrames，
+# 上游 microsoft/playwright#13444），不同版本触发概率不同；锁到已验证的
+# 1.60.0（满足 camoufox 的 <1.63），并配合 deploy/patch_playwright_driver.py 打补丁。
+playwright==1.60.0    # Camoufox 的 Playwright 驱动

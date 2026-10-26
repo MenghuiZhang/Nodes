@@ -9,7 +9,7 @@ Nodes 是一个面向 ProxyScrape 账户注册、邮箱验证、试用代理领�
 - 中文响应式 Web 控制台，兼容桌面和手机浏览器。
 - 单个或批量注册任务、实时进度、日志和历史记录。
 - 支持自建云芯邮箱 API，并保留 YYDS Mail 兼容配置。
-- 支持 2Captcha API，也可切换本地 Chromium 浏览器流程。
+- 支持 2Captcha/YesCaptcha/CapMonster API，也可切换本地 Camoufox 浏览器流程。
 - 账户导入、刷新、删除、用量同步和 API Key 管理。
 - 代理库存、延迟、出口 IP、地区及健康状态管理。
 - 按延迟、地区、连通性和探测条件执行质量筛选。
@@ -31,8 +31,8 @@ Nodes 是一个面向 ProxyScrape 账户注册、邮箱验证、试用代理领�
 | `proxy_quality.py` | 代理检测、质量规则和筛选逻辑 |
 | `platform_store.py` | 平台配置与持久化 |
 | `filter_xai_proxies.py` | 代理可用性批量检测工具 |
+| `deploy/patch_playwright_driver.py` | Playwright Firefox 驱动补丁（Turnstile iframe 竞态） |
 | `templates/`、`static/` | 中文响应式 Web 前端 |
-| `turnstilePatch/` | 浏览器模式使用的扩展资源 |
 | `compose.yml`、`Dockerfile` | Docker 构建与部署配置 |
 | `DEPLOYMENT.md` | 服务器部署与维护补充说明 |
 
@@ -73,7 +73,10 @@ docker compose logs -f dashboard
 
 ## Python 本地运行
 
-要求：Python 3.10+、Chrome/Chromium。
+要求：Python 3.10+。本地打码（`captcha_provider: browser`）会自动使用
+Camoufox（基于 Firefox 的反检测浏览器），首次运行前需执行一次
+`python -m camoufox fetch` 下载浏览器内核，并运行
+`python deploy/patch_playwright_driver.py` 打驱动补丁。
 
 ```bash
 python -m venv .venv
@@ -123,7 +126,10 @@ YYDS Mail 兼容字段为 `yyds_api_key` 和 `yyds_domain`。请勿将真实 Key
 }
 ```
 
-如需使用本地浏览器流程，将 `captcha_provider` 设置为 `browser`，并按需设置 `turnstile_extension_path`。验证码是否通过由目标站点决定，项目不会把未完成验证的任务标记为成功。
+如需使用本地浏览器流程，将 `captcha_provider` 设置为 `browser`。本地流程用
+Camoufox 打开真实 sign-up 页通过 Cloudflare Turnstile（指纹伪装原生内置，无需
+扩展），token 生成后即关闭浏览器，注册/收信/验证全走 HTTP。验证码是否通过由
+目标站点决定，项目不会把未完成验证的任务标记为成功。
 
 ### Web 登录与导出
 
@@ -192,7 +198,10 @@ git diff --check
 
 ### 浏览器找不到
 
-确认 Chrome/Chromium 已安装，并通过环境变量或配置指定可执行文件路径。Linux 容器还需要足够的 `/dev/shm`，Compose 已示例配置 `shm_size: 2gb`。
+本地打码使用 Camoufox。先执行 `python -m camoufox fetch` 下载浏览器内核
+（Docker 镜像已内置），再运行 `python deploy/patch_playwright_driver.py`
+打 Playwright 驱动补丁。Linux 容器还需要足够的 `/dev/shm`，Compose 已示例配置
+`shm_size: 2gb`。
 
 ### 注册页能打开但验证超时
 

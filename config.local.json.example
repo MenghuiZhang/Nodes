@@ -12,7 +12,6 @@
   "captcha_api_base": "https://api.yescaptcha.com",
   "captcha_timeout": 180,
   "captcha_poll_interval": 5,
-  "turnstile_extension_path": "",
   "web_username": "admin",
   "web_password_hash": "GENERATE_WITH_werkzeug.security.generate_password_hash",
   "web_session_secret": "YOUR_WEB_SESSION_SECRET",

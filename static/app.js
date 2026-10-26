@@ -31,7 +31,7 @@ const settingFields = {
   ],
   registration: ['proxy_enabled', 'http_proxy', 'https_proxy', 'no_proxy'],
   mail: ['mail_provider', 'mail_type', 'mail_suffix', 'mail_domain', 'mail_api_base', 'mail_api_key', 'yyds_api_key', 'yyds_domain'],
-  captcha: ['captcha_provider', 'captcha_timeout', 'captcha_poll_interval', 'turnstile_extension_path', 'captcha_api_base', 'captcha_api_key'],
+  captcha: ['captcha_provider', 'captcha_timeout', 'captcha_poll_interval', 'captcha_api_base', 'captcha_api_key'],
   exports: ['export_quality_profile'],
 };
 
@@ -50,7 +50,7 @@ function applyCaptchaProviderDefault(force = false) {
   if (force || !apiBase.value.trim() || Object.values(captchaApiDefaults).includes(apiBase.value.trim())) {
     apiBase.value = next;
   }
-  apiBase.placeholder = next || 'browser 模式无需 API 地址';
+  apiBase.placeholder = next || '本地 Camoufox 模式无需 API 地址';
 }
 
 function appUrl(path) {

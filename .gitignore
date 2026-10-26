@@ -15,8 +15,7 @@ proxyscrape_token.json
 # Generated accounts and proxy credentials
 account/
 node/
-
-# turnstilePatch 扩展现随仓库提供（开箱即用）；仍可用 TURNSTILE_EXTENSION_PATH 覆盖为本机其它目录
+web-data/
 
 # Runtime artifacts
 *.log

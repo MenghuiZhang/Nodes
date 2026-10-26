@@ -76,7 +76,6 @@ SETTINGS_KEYS = (
     "captcha_api_base",
     "captcha_timeout",
     "captcha_poll_interval",
-    "turnstile_extension_path",
     "proxy_enabled",
     "http_proxy",
     "https_proxy",
@@ -195,7 +194,6 @@ SETTINGS_GROUPS = {
         "captcha_api_base",
         "captcha_timeout",
         "captcha_poll_interval",
-        "turnstile_extension_path",
         "proxy_enabled",
         "http_proxy",
         "https_proxy",
@@ -244,7 +242,6 @@ def _public_settings(config):
         "captcha_api_base": str(config.get("captcha_api_base") or "https://api.2captcha.com"),
         "captcha_timeout": int(config.get("captcha_timeout") or 180),
         "captcha_poll_interval": int(float(config.get("captcha_poll_interval") or 5)),
-        "turnstile_extension_path": str(config.get("turnstile_extension_path") or ""),
         "proxy_enabled": _as_bool(config.get("proxy_enabled")),
         "http_proxy": str(config.get("http_proxy") or ""),
         "https_proxy": str(config.get("https_proxy") or ""),
@@ -476,7 +473,7 @@ def _apply_settings(payload):
     }
     captcha_keys = {
         "captcha_provider", "captcha_api_key", "captcha_api_base", "captcha_timeout",
-        "captcha_poll_interval", "turnstile_extension_path",
+        "captcha_poll_interval",
     }
     egress_keys = {"proxy_enabled", "http_proxy", "https_proxy", "no_proxy"}
     mail_touch = bool(set(incoming) & mail_keys) or (not group and bool(set(incoming) & set(SETTINGS_GROUPS["registration"])))
@@ -520,7 +517,6 @@ def _apply_settings(payload):
         next_config["captcha_api_base"] = submitted_captcha_base
         next_config["captcha_timeout"] = timeout
         next_config["captcha_poll_interval"] = poll
-        next_config["turnstile_extension_path"] = str(merged["turnstile_extension_path"] or "").strip()
         if captcha_provider in {"2captcha", "yescaptcha", "capmonster"} and not next_config["captcha_api_key"]:
             provider_name = {"yescaptcha": "YesCaptcha", "capmonster": "CapMonster Cloud"}.get(captcha_provider, "2Captcha")
             raise ValueError(provider_name + " 需要填写 API Key")

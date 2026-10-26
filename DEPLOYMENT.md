@@ -7,23 +7,37 @@
 - Interactive launcher: `/usr/local/bin/nodes`
 
 The project provides both an interactive CLI and an authenticated Web dashboard.
-CLI browser mode runs Chromium in an isolated Xvfb display. Generated accounts,
-proxy data, and Web task state persist under `/opt/nodes/data`.
+CLI browser mode runs Camoufox (a Firefox-based anti-detect browser) in an
+isolated Xvfb display. Generated accounts, proxy data, and Web task state
+persist under `/opt/nodes/data`.
 
 Before the first registration run, edit `/opt/nodes/config.local.json` and set a
 valid `yyds_api_key`. The file is mode `0600` and mounted read-only in the
 container.
 
-## Linux compatibility patch
+## Browser engine (Camoufox)
 
-Chromium 152 rejects the repository's Manifest V2 extension. The server release
-keeps the original as `turnstilePatch/manifest.json.upstream-v2` and uses a
-Manifest V3 declaration with the same content script in the page's main world.
-No registration logic was changed.
+Local Turnstile solving (`captcha_provider: browser`) uses Camoufox with
+Playwright. The browser binary and the fpgen fingerprint model are baked into
+the Docker image at build time (`python -m camoufox fetch`); no runtime
+download is needed.
 
-The image uses a small entrypoint that starts Xvfb and waits for its Unix socket.
-This avoids the `xvfb-run` readiness-signal hang observed on the server's CentOS 7
-kernel.
+The image applies a null-guard patch to the Playwright Firefox driver bundle
+(`deploy/patch_playwright_driver.py`): upstream
+[microsoft/playwright#13444](https://github.com/microsoft/playwright/issues/13444)
+can kill the driver process when a Turnstile cross-origin iframe is destroyed
+during navigation commit. The patch fails the build if the Playwright version
+changes and the patch points no longer match.
+
+For non-Docker (systemd/pip) deployments, run the patch once after
+`pip install -r requirements.txt`:
+
+```bash
+python deploy/patch_playwright_driver.py
+```
+
+The entrypoint starts Xvfb and waits for its Unix socket. This avoids the
+`xvfb-run` readiness-signal hang observed on the server's CentOS 7 kernel.
 
 ## Mail provider
 
@@ -35,8 +49,8 @@ provider while retaining YYDS compatibility. The API key is stored only in
 
 The `yunxin2-2captcha` release uses the 2Captcha API v2 proxyless Turnstile
 task by default. It sends the ProxyScrape sign-up URL and sitekey to
-`createTask`, then polls `getTaskResult` every five seconds. The original
-browser solver remains available with `captcha_provider: browser`.
+`createTask`, then polls `getTaskResult` every five seconds. The local Camoufox
+solver remains available with `captcha_provider: browser`.
 
 The 2Captcha key is stored only in `/opt/nodes/config.local.json` with mode
 `0600`; environment variables can override all captcha settings.

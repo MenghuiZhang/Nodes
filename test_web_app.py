@@ -306,6 +306,10 @@ class PoolExportTests(unittest.TestCase):
         self.patches = [
             patch.object(target, "ACCOUNT_DIR", self.account_dir),
             patch.object(target, "NODE_DIR", self.node_dir),
+            # 质量门默认开启会真实联网探测 slot（假 IP 必超时全拒），
+            # 导出用例只关心格式与数量，这里显式关闭。
+            patch.object(target, "_config_for_quality",
+                         lambda *args, **kwargs: {"proxy_quality_enabled": False}),
         ]
         for item in self.patches:
             item.start()
@@ -353,7 +357,7 @@ class PoolExportTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.content_type.startswith("text/plain"))
         lines = [line for line in response.get_data(as_text=True).splitlines() if line.strip()]
-        self.assertEqual(len(lines), 10)
+        self.assertEqual(len(lines), 8)
         self.assertTrue(all(line.startswith("http://user-one:pw@") for line in lines))
         self.assertTrue(all("9.9.9.9" not in line for line in lines))
         again = self.client.get("/api/export/live-proxies?token=test-export-token")
@@ -362,13 +366,13 @@ class PoolExportTests(unittest.TestCase):
     def test_live_proxies_harvests_missing_ips_from_node_files(self):
         self.write_account(self.live_record("two@example.com", [], proxy_username="user-two", proxy_ips=[]))
         (self.node_dir / "proxies_old.txt").write_text(
-            "\n".join(f"http://user-two:pw@11.1.1.{index}:8080" for index in range(1, 14)) + "\n",
+            "\n".join(f"http://user-two:pw@11.1.1.{index}:8080" for index in range(1, 10)) + "\n",
             encoding="utf-8",
         )
         response = self.client.get("/api/export/live-proxies?token=test-export-token")
         self.assertEqual(response.status_code, 200)
         lines = [line for line in response.get_data(as_text=True).splitlines() if line.strip()]
-        self.assertEqual(len(lines), 10)
+        self.assertEqual(len(lines), 8)
         self.assertTrue(all("user-two:pw@11.1.1." in line for line in lines))
 
     def test_live_proxies_scales_eight_slots_per_account(self):
@@ -381,9 +385,9 @@ class PoolExportTests(unittest.TestCase):
             ))
         response = self.client.get("/api/export/live-proxies?token=test-export-token")
         lines = [line for line in response.get_data(as_text=True).splitlines() if line.strip()]
-        self.assertEqual(len(lines), 20)
-        self.assertEqual(sum(1 for line in lines if "user-1:pw@" in line), 10)
-        self.assertEqual(sum(1 for line in lines if "user-2:pw@" in line), 10)
+        self.assertEqual(len(lines), 16)
+        self.assertEqual(sum(1 for line in lines if "user-1:pw@" in line), 8)
+        self.assertEqual(sum(1 for line in lines if "user-2:pw@" in line), 8)
 
     @patch.object(target.pool, "resin_auth", return_value=("gw-token", "V1"))
     def test_gpt_gateway_matches_live_slot_count(self, _auth):
@@ -397,11 +401,11 @@ class PoolExportTests(unittest.TestCase):
         response = self.client.get("/api/export/gpt-gateway?token=test-export-token")
         self.assertEqual(response.status_code, 200)
         lines = [line for line in response.get_data(as_text=True).splitlines() if line.strip()]
-        self.assertEqual(len(lines), 20)
+        self.assertEqual(len(lines), 16)
         self.assertTrue(all(":8970" in line for line in lines))
         self.assertTrue(all("Nodes.n" in line for line in lines))
         self.assertIn("Nodes.n01:", lines[0])
-        self.assertIn("Nodes.n20:", lines[-1])
+        self.assertIn("Nodes.n16:", lines[-1])
 
     @patch.object(target.pool, "resin_auth", return_value=("gw-token", "V1"))
     def test_clash_export_matches_live_slot_count(self, _auth):
@@ -419,28 +423,23 @@ class PoolExportTests(unittest.TestCase):
         body = response.get_data(as_text=True)
         self.assertIn("type: http", body)
         self.assertNotIn("type: socks5", body)
-        self.assertNotIn(":8970", body)
-        self.assertIn("节点 01", body)
-        self.assertIn("节点 20", body)
-        self.assertEqual(body.count("type: http"), 20)
-        self.assertIn("username: \"user-1\"", body)
-        self.assertIn('server: "10.1.1.1"', body)
+        self.assertNotIn('server: "10.1.1.', body)
+        self.assertIn('name: "Nodes-01"', body)
+        self.assertIn('name: "Nodes-16"', body)
+        self.assertEqual(body.count("type: http"), 16)
+        self.assertIn('username: "Nodes.n01"', body)
 
-    def test_clash_profile_keeps_fastest_in_each_country(self):
-        entries = [{
-            "proxy_username": "user-1",
-            "proxy_password": "pw",
-            "slots": ["1.1.1.1:3129", "1.1.1.2:3129", "2.2.2.1:3129", "2.2.2.2:3129"],
-        }]
-        regions = {"1.1.1.1": "us", "1.1.1.2": "us", "2.2.2.1": "de", "2.2.2.2": "de"}
-        latency = {"1.1.1.1": 500, "1.1.1.2": 40, "2.2.2.1": 300, "2.2.2.2": 50}
-        body = target.pool.clash_profile(entries, regions, latency, per_country=1)
-        self.assertIn("1.1.1.2", body)
-        self.assertNotIn("1.1.1.1", body)
-        self.assertIn("2.2.2.2", body)
-        self.assertNotIn("2.2.2.1", body)
-        self.assertIn("美国", body)
-        self.assertIn("德国", body)
+    def test_clash_yaml_renders_gateway_slots_with_url_test_group(self):
+        body = target.pool.clash_yaml(
+            2, "gw-token", "198.18.0.1", 8970, "V1", "Nodes", protocol="http",
+        )
+        self.assertIn("type: http", body)
+        self.assertNotIn("type: socks5", body)
+        self.assertIn('server: "198.18.0.1"', body)
+        self.assertIn('name: "Nodes-01"', body)
+        self.assertIn('name: "Nodes-02"', body)
+        self.assertIn('username: "Nodes.n01"', body)
+        self.assertIn("type: url-test", body)
 
     @patch.object(target.pool, "resin_auth", return_value=("gw-token", "V1"))
     def test_clash_export_accepts_query_token_even_with_dummy_bearer(self, _auth):
@@ -469,7 +468,7 @@ class PoolExportTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         decoded = base64.b64decode(response.get_data(as_text=True).strip()).decode("utf-8")
         lines = [line for line in decoded.splitlines() if line.strip()]
-        self.assertEqual(len(lines), 10)
+        self.assertEqual(len(lines), 8)
         self.assertTrue(all(line.startswith("http://Nodes.n") for line in lines))
         self.assertTrue(all(":8970#" in line for line in lines))
 

@@ -3,13 +3,13 @@
 ProxyScrape 自动注册 —— 本地打码走协议
 
 思路（最快最省）：
-  · 浏览器（DrissionPage + turnstilePatch 扩展）只干一件事：在真实 sign-up 页
-    里让 Cloudflare Turnstile 自动过，读出隐藏字段 cf-turnstile-response 的 token。
-    token 在真实域名 dashboard.proxyscrape.com 下生成，hostname 天然匹配，
-    服务端 siteverify 不会因 hostname 拒绝。
+  · 浏览器（Camoufox + Playwright，Firefox 反检测内核，指纹原生伪装）只干
+    一件事：在真实 sign-up 页里让 Cloudflare Turnstile 自动过，读出隐藏字段
+    cf-turnstile-response 的 token。token 在真实域名 dashboard.proxyscrape.com
+    下生成，hostname 天然匹配，服务端 siteverify 不会因 hostname 拒绝。
   · 临时邮箱、注册、收验证码、验邮箱 —— 全部走 HTTP 协议，不碰浏览器。
 
-依赖：DrissionPage / requests（用 grok 项目那个 venv 跑即可）
+依赖：requests（打码平台路线）/ camoufox[geoip]+playwright（本地打码路线）
 用法：python proxyscrape_register.py
 """
 
@@ -66,7 +66,8 @@ YYDS_KEY = str(_setting("yyds_api_key", "YYDS_API_KEY")).strip()
 YYDS_DOMAIN = str(_setting("yyds_domain", "YYDS_DOMAIN")).strip()
 
 # Turnstile solver. When a 2Captcha key is configured, use its API by default;
-# otherwise keep the original browser solver for backward compatibility.
+# otherwise keep the local Camoufox solver for backward compatibility.
+# 本地打码（captcha_provider=browser）用 Camoufox 过 Turnstile，不依赖打码平台。
 CAPTCHA_API_KEY = str(_setting("captcha_api_key", "CAPTCHA_API_KEY")).strip()
 CAPTCHA_PROVIDER = str(_setting(
     "captcha_provider", "CAPTCHA_PROVIDER",
@@ -158,13 +159,6 @@ PERMISSION_CATALOG = {
     },
 }
 
-# turnstilePatch 扩展：默认读取项目内目录，也可通过环境变量覆盖
-EXTENSION_PATH = str(
-    _LOCAL_CONFIG.get("turnstile_extension_path")
-    or os.environ.get("TURNSTILE_EXTENSION_PATH")
-    or os.path.join(_BASE, "turnstilePatch")
-).strip()
-
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36")
 
@@ -197,7 +191,6 @@ def reload_settings():
     global _LOCAL_CONFIG, MAIL_PROVIDER, MAIL_API_BASE, MAIL_API_KEY, MAIL_TYPE
     global MAIL_SUFFIX, MAIL_DOMAIN, YYDS_KEY, YYDS_DOMAIN, CAPTCHA_API_KEY
     global CAPTCHA_PROVIDER, CAPTCHA_API_BASE, CAPTCHA_TIMEOUT, CAPTCHA_POLL_INTERVAL
-    global EXTENSION_PATH
     _LOCAL_CONFIG = _load_local_config()
     MAIL_PROVIDER = str(_setting("mail_provider", "MAIL_PROVIDER")).strip().lower()
     MAIL_API_BASE = str(_setting(
@@ -223,11 +216,6 @@ def reload_settings():
     )
     if not MAIL_PROVIDER:
         MAIL_PROVIDER = "yunxin" if MAIL_API_KEY else "yyds"
-    EXTENSION_PATH = str(
-        _LOCAL_CONFIG.get("turnstile_extension_path")
-        or os.environ.get("TURNSTILE_EXTENSION_PATH")
-        or os.path.join(_BASE, "turnstilePatch")
-    ).strip()
     _apply_proxy_env()
 
 
@@ -473,15 +461,8 @@ try{
 }catch(e){ return JSON.stringify({err:String(e)}); }
 """
 
-# 注入进 turnstile iframe，伪装真实鼠标屏幕坐标（反自动化检测）
-_SCREEN_INJECT_JS = r"""
-window.dtp=1;
-function ri(a,b){return Math.floor(Math.random()*(b-a+1))+a;}
-Object.defineProperty(MouseEvent.prototype,'screenX',{value:ri(800,1200)});
-Object.defineProperty(MouseEvent.prototype,'screenY',{value:ri(400,700)});
-"""
-
 # 兜底：页面自带组件半挂载不出 iframe 时，用已知 sitekey 自己 render 一个干净 widget
+# （以 (sitekey) => {…} 包裹执行，sitekey 由 evaluate 参数传入）
 _RENDER_JS = r"""
 try{
   if(!window.turnstile || typeof turnstile.render!=='function') return 'no-api';
@@ -493,7 +474,7 @@ try{
     document.body.appendChild(c);
   }
   window.__ps_wid=turnstile.render(c,{
-    sitekey: arguments[0],
+    sitekey: sitekey,
     callback: function(t){ window.__ps_token=t; }
   });
   c.setAttribute('data-done','1');
@@ -502,129 +483,237 @@ try{
 """
 
 
-def _read_state(tab):
+# 钩住 attachShadow 捕获 closed shadow root（Turnstile widget 用 closed shadow
+# 藏 checkbox，标准 DOM 探测拿不到；捕获后可通过 __shadowRoots 读取状态）
+_SHADOW_PATCH_JS = r"""
+(() => {
+  if (window.__shadowPatched) return;
+  window.__shadowPatched = true;
+  window.__shadowRoots = [];
+  const orig = Element.prototype.attachShadow;
+  Element.prototype.attachShadow = function (init) {
+    const root = orig.call(this, init);
+    try {
+      if (init && init.mode === 'closed') window.__shadowRoots.push(root);
+    } catch (e) {}
+    return root;
+  };
+})();
+"""
+
+# 穿透 shadow DOM 读 token（含捕获的 closed root），配合 _STATE_JS 双保险
+_SHADOW_TOKEN_JS = r"""
+(() => {
+  const scan = (root) => {
+    const el = root.querySelector('input[name="cf-turnstile-response"]');
+    if (el && el.value && el.value.length > 20) return String(el.value);
+    for (const node of root.querySelectorAll('*')) {
+      if (node.shadowRoot && scan(node.shadowRoot)) return scan(node.shadowRoot);
+    }
+    return '';
+  };
+  return scan(document);
+})()
+"""
+
+
+# 钩住 attachShadow 捕获 closed shadow root（Turnstile widget 的 checkbox 藏在
+# closed shadow 里，标准 DOM 探测拿不到；捕获后可经 __shadowRoots 读 token）
+_SHADOW_PATCH_JS = r"""
+(() => {
+  if (window.__shadowPatched) return;
+  window.__shadowPatched = true;
+  window.__shadowRoots = [];
+  const orig = Element.prototype.attachShadow;
+  Element.prototype.attachShadow = function (init) {
+    const root = orig.call(this, init);
+    try {
+      if (init && init.mode === 'closed') window.__shadowRoots.push(root);
+    } catch (e) {}
+    return root;
+  };
+})();
+"""
+
+# 穿透 shadow DOM（含捕获的 closed root）读 token，与 _STATE_JS 双保险
+_SHADOW_TOKEN_JS = r"""
+(() => {
+  const scan = (root) => {
+    const el = root.querySelector('input[name="cf-turnstile-response"]');
+    if (el && el.value && el.value.length > 20) return String(el.value);
+    for (const node of root.querySelectorAll('*')) {
+      if (node.shadowRoot) {
+        const found = scan(node.shadowRoot);
+        if (found) return found;
+      }
+    }
+    return '';
+  };
+  return scan(document);
+})()
+"""
+
+
+def _read_state(page):
     """读一次 widget 状态，返回 dict；解析失败返回空 dict。"""
     try:
-        raw = tab.run_js(_STATE_JS)
+        raw = page.evaluate("() => {%s}" % _STATE_JS)
         return json.loads(raw) if raw else {}
     except Exception:
         return {}
 
 
-def solve_turnstile_browser(headless=False, timeout=120):
-    """打开真实 sign-up 页，全程检测状态（不盲等固定时间）：
-      1) 等页面 ready 且 window.turnstile API 就绪
-      2) 填占位表单 → 检测 cf-turnstile-response input 挂载
-      3) 若页面组件半挂载迟迟不出 challenge iframe，用已知 sitekey 自己 render 兜底
-      4) 检测到 challenge iframe 后进 iframe 点 checkbox（每步都检测，出来才动手）
-      5) 轮询直到 token（≥80）出现
-    每一步独立检测 + 日志，卡在哪一步一目了然。"""
-    from DrissionPage import Chromium, ChromiumOptions
-
-    opts = ChromiumOptions()
-    opts.auto_port()  # 每个实例独立端口 + 独立临时用户目录（支持并发多开）
-    for flag in ("--no-first-run", "--no-sandbox", "--disable-dev-shm-usage",
-                 "--disable-background-networking", "--mute-audio",
-                 "--disable-gpu", "--window-size=1280,900"):
-        opts.set_argument(flag)
-    if headless:
-        # 真 headless 过不了 Turnstile（Cloudflare 检测无头）。改用「隐形有头」：
-        # 有头浏览器保证过检，窗口挪到屏幕外，启动后再 hide()，用户完全看不见。
-        opts.set_argument("--window-position=-32000,-32000")
-    if os.path.exists(EXTENSION_PATH):
-        opts.add_extension(EXTENSION_PATH)
-    else:
-        log(f"[!] 找不到 turnstilePatch 扩展: {EXTENSION_PATH}")
-
-    browser = Chromium(opts)
-    tab = browser.latest_tab
-    if headless:
-        try:
-            tab.set.window.hide()   # Windows 下真正隐藏窗口，进程照常渲染，Turnstile 不受影响
-        except Exception:
-            pass
+def _shadow_token(page):
+    """从 shadow DOM（含 closed root）里读 token，读不到返回空串。"""
     try:
-        deadline = time.time() + timeout
-        log("浏览器打开 sign-up 页…")
-        tab.get(PS_SIGNUP_PAGE)
+        return str(page.evaluate("() => %s" % _SHADOW_TOKEN_JS) or "").strip()
+    except Exception:
+        return ""
 
-        # ① 等页面 ready 且 turnstile API 就绪（网络慢，检测到才继续，不盲等）
-        while time.time() < deadline:
-            st = _read_state(tab)
-            if st.get("ready") and st.get("hasApi"):
-                break
-            time.sleep(0.5)
-        else:
-            raise TimeoutError("等待页面/turnstile API 就绪超时")
-        log("页面就绪，turnstile API 已加载")
 
-        # ② 填占位表单，然后检测 cf-turnstile-response input 是否挂载（不 sleep 后瞎找）
-        tab.run_js(_FILL_JS)
-        input_seen = False
+def _challenge_box(page):
+    """challenge iframe 的视口坐标（用于推算 checkbox 点击位置）。
+
+    Turnstile 宿主 iframe 藏在 closed shadow DOM 里，DOM 查询拿不到 src 属性，
+    但 Playwright 的 frame 树能看到真实 URL —— 用 frame_element() 定位几何。"""
+    try:
+        for frame in page.frames:
+            if "challenges.cloudflare.com" not in frame.url and "turnstile" not in frame.url:
+                continue
+            el = frame.frame_element()
+            return el.bounding_box()
+    except Exception:
+        pass
+    return None
+
+
+def _probe_exit_ip(proxy_url, timeout=12):
+    """经代理探测出口 IP（Camoufox geoip 只接受 IP，不接受域名）。"""
+    import requests as _rq
+
+    proxies = {"http": proxy_url, "https": proxy_url}
+    # HTTPS 端点优先：ip-api 免费版仅 HTTP(80)，不少节点屏蔽明文 HTTP
+    for endpoint in ("https://ipwho.is/", "https://api.ip.sb/geoip", "https://api.ipify.org"):
+        try:
+            resp = _rq.get(endpoint, proxies=proxies, timeout=timeout)
+            if resp.ok:
+                data = resp.json()
+                ip = str(data.get("ip") or data.get("query") or "").strip()
+                if ip:
+                    return ip
+        except Exception:
+            continue
+    return ""
+
+
+def solve_turnstile_browser(headless=True, timeout=180):
+    """Camoufox（Firefox 反检测内核）打开真实 sign-up 页过 Turnstile：
+      1) 启动 Camoufox（指纹伪装原生内置，无需扩展），带上游代理并做 geoip 对齐
+      2) 等 cf-turnstile-response input 挂载（页面隐式渲染 widget，顶层无 turnstile API）
+      3) 填占位表单触发 widget 激活
+      4) challenge iframe（closed shadow DOM 内）出现且完成布局后在 checkbox 位置
+         点一次 —— 只点一下，点完只轮询 token（Verifying 中重复点击会 reset 挑战，
+         表现为「刚勾上又弹回」）
+      5) 检测到 "Verification failed" 终态立即放弃（多为出口 IP 信誉差）
+    成功返回 token；失败抛异常交给外层重试。"""
+    from camoufox.sync_api import Camoufox
+
+    kwargs = {
+        "headless": bool(headless),
+        "os": ("macos" if sys.platform == "darwin" else "linux"),
+        "locale": "en-US",
+        "humanize": True,
+        "window": (1280, 900),
+    }
+    proxy_url = str(os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or "").strip()
+    if proxy_url:
+        # token 在代理出口 IP 上生成，与后续注册 POST 的出口对齐，降低风控
+        kwargs["proxy"] = {"server": proxy_url}
+        # 指纹与出口对齐：时区/经纬度跟随节点所在地（本地 MaxMind 离线查询）。
+        # 先预探测出口 IP：geoip 探测失败的节点不启用对齐，避免启动阶段报错
+        try:
+            from camoufox.geolocation import geoip_allowed, get_geolocation
+
+            geoip_allowed()
+            exit_ip = _probe_exit_ip(proxy_url)
+            if exit_ip:
+                geo = get_geolocation(exit_ip)
+                kwargs["geoip"] = exit_ip
+                log(f"出口 {geo.locale.region_code or '?'}（{exit_ip}）时区 {geo.timezone}，geoip 对齐")
+            else:
+                log("[!] 出口 IP 探测失败，跳过 geoip 对齐（时区/坐标可能与节点不匹配）")
+        except Exception as exc:
+            log(f"[!] geoip 对齐跳过: {exc}")
+
+    deadline = time.time() + timeout
+    with Camoufox(**kwargs) as browser:
+        page = browser.new_page()
+        page.set_default_timeout(20000)
+        try:
+            page.add_init_script(_SHADOW_PATCH_JS)
+        except Exception as exc:
+            log(f"[!] attachShadow 钩子注入失败: {exc}")
+        log("Camoufox 打开 sign-up 页…")
+        page.goto(PS_SIGNUP_PAGE, wait_until="domcontentloaded", timeout=60000)
+
+        # ① 等 cf-turnstile-response input 挂载（sign-up 页是隐式渲染 widget，
+        #    顶层没有 window.turnstile API，不能拿 hasApi 当就绪条件）
         while time.time() < deadline:
-            st = _read_state(tab)
-            if st.get("token"):                      # 极快场景：填完直接就有 token
-                log(f"Turnstile 通过（预热即得），token 长度={st['tokenLen']}")
-                return st["token"]
+            st = _read_state(page)
             if st.get("hasInput"):
-                input_seen = True
                 break
-            time.sleep(0.5)
-        if not input_seen:
+            page.wait_for_timeout(500)
+        else:
             raise TimeoutError("等待 cf-turnstile-response 挂载超时")
         log("检测到 turnstile input 已挂载")
 
-        # ③ 短暂检测原生 challenge iframe 是否自行出现；若半挂载不出，则自己 render 兜底
-        render_deadline = min(deadline, time.time() + 12)
-        while time.time() < render_deadline:
-            st = _read_state(tab)
-            if st.get("token"):
-                log(f"Turnstile 通过，token 长度={st['tokenLen']}")
-                return st["token"]
-            if st.get("hasIframe"):
-                break
-            time.sleep(0.6)
-        if not _read_state(tab).get("hasIframe"):
-            # 原生组件半挂载没出 iframe —— 用已知 sitekey 自己 render 一个干净 widget
-            r = tab.run_js(_RENDER_JS, PS_SITEKEY)
-            log(f"原生 widget 未出 iframe，显式 render 兜底: {r}")
+        # ② 填占位表单触发 widget 激活。challenge iframe 藏在 closed shadow DOM,
+        #    顶层 hasIframe 永远是 false,不能拿来当阶段门;预热即得的 token
+        #    与点击都在下面的轮询里处理。
+        page.evaluate("() => {%s}" % _FILL_JS)
 
-        # ④ 检测到 challenge iframe 才进去点 checkbox；⑤ 轮询 token
+        # ③ challenge iframe 出现后定位 checkbox 点一次；④ 只轮询 token，绝不重复点击
+        #    （Verifying 中重复点击会 reset 挑战，表现为「刚勾上又弹回」）
+        clicked = False
         while time.time() < deadline:
-            st = _read_state(tab)
-            if st.get("token"):
-                log(f"Turnstile 通过，token 长度={st['tokenLen']}")
-                return st["token"]
-            # 显式 render 的回调 token
+            st = _read_state(page)
+            token = st.get("token") or _shadow_token(page)
+            if len(token) >= 80:
+                log(f"Turnstile 通过，token 长度={len(token)}")
+                return token
             try:
-                cb = str(tab.run_js("return String(window.__ps_token||'')") or "").strip()
+                cb = str(page.evaluate("() => String(window.__ps_token || '')") or "").strip()
                 if len(cb) >= 80:
                     log(f"Turnstile 通过（render 回调），token 长度={len(cb)}")
                     return cb
             except Exception:
                 pass
 
-            if st.get("hasIframe"):
-                iframe = tab.ele("tag:iframe@|src:challenges.cloudflare.com@|src:turnstile", timeout=2)
-                if iframe:
+            if not clicked:
+                # widget 未完成布局时 bounding_box 会给 0×0，等有效尺寸再点
+                box = _challenge_box(page)
+                if box and box.get("width", 0) >= 100 and box.get("height", 0) >= 40:
+                    # checkbox 在 challenge iframe 左侧约 30px 处（实测 300x65 widget）
+                    x = int(box["x"] + 30)
+                    y = int(box["y"] + box["height"] / 2)
                     try:
-                        iframe.run_js(_SCREEN_INJECT_JS)
-                    except Exception:
-                        pass
-                    try:
-                        body_sr = iframe.ele("tag:body").shadow_root
-                        btn = body_sr.ele("tag:input", timeout=2)
-                        if btn:
-                            btn.click()
-                    except Exception:
-                        pass
-            time.sleep(1.0)
+                        page.mouse.move(x - 80, y - 60, steps=6)
+                        page.mouse.move(x, y, steps=8)
+                        page.wait_for_timeout(120)
+                        page.mouse.click(x, y)
+                        clicked = True
+                        log(f"已点击 challenge iframe ({x},{y})，等待 token（不重复点击）")
+                    except Exception as exc:
+                        log(f"[!] 点击 challenge 失败: {exc}")
+
+            try:
+                text = str(page.evaluate("() => document.body ? document.body.innerText : ''") or "").lower()
+            except Exception:
+                text = ""
+            if "verification failed" in text:
+                raise RuntimeError("Turnstile Verification failed（出口 IP 信誉可能较差）")
+            page.wait_for_timeout(1000)
         raise TimeoutError("Turnstile 求解超时（已检测到各阶段状态，token 未生成）")
-    finally:
-        try:
-            browser.quit()
-        except Exception:
-            pass
 
 
 def _captcha_post(path, payload):

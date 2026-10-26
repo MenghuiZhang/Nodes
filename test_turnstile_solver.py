@@ -58,6 +58,16 @@ class TwoCaptchaSolverTests(unittest.TestCase):
         with self.assertRaisesRegex(TimeoutError, "求解超时"):
             target.solve_turnstile_2captcha(timeout=5)
 
+    @patch.object(target, "solve_turnstile_browser", return_value="camoufox-token")
+    def test_dispatches_to_local_camoufox(self, solve):
+        original_provider = target.CAPTCHA_PROVIDER
+        target.CAPTCHA_PROVIDER = "browser"
+        try:
+            self.assertEqual(target.solve_turnstile(headless=True), "camoufox-token")
+            solve.assert_called_once_with(headless=True, timeout=120)
+        finally:
+            target.CAPTCHA_PROVIDER = original_provider
+
     @patch.object(target, "solve_turnstile_2captcha", return_value="token")
     def test_dispatches_to_2captcha(self, solve):
         original_provider = target.CAPTCHA_PROVIDER
