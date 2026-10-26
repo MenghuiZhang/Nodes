@@ -33,6 +33,7 @@ import pool
 import platform_store
 import proxy_quality
 import proxyscrape_register as worker
+from mail_domain_pool import DomainPoolError, get_domain_pool
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -71,6 +72,9 @@ SETTINGS_KEYS = (
     "mail_domain",
     "yyds_api_key",
     "yyds_domain",
+    "cf_temp_base",
+    "cf_temp_admin_key",
+    "cf_temp_domain",
     "captcha_provider",
     "captcha_api_key",
     "captcha_api_base",
@@ -189,6 +193,9 @@ SETTINGS_GROUPS = {
         "mail_domain",
         "yyds_api_key",
         "yyds_domain",
+        "cf_temp_base",
+        "cf_temp_admin_key",
+        "cf_temp_domain",
         "captcha_provider",
         "captcha_api_key",
         "captcha_api_base",
@@ -237,6 +244,9 @@ def _public_settings(config):
         "mail_domain": str(config.get("mail_domain") or ""),
         "yyds_api_key": str(config.get("yyds_api_key") or ""),
         "yyds_domain": str(config.get("yyds_domain") or ""),
+        "cf_temp_base": str(config.get("cf_temp_base") or ""),
+        "cf_temp_admin_key": str(config.get("cf_temp_admin_key") or ""),
+        "cf_temp_domain": str(config.get("cf_temp_domain") or ""),
         "captcha_provider": str(config.get("captcha_provider") or "2captcha"),
         "captcha_api_key": str(config.get("captcha_api_key") or ""),
         "captcha_api_base": str(config.get("captcha_api_base") or "https://api.2captcha.com"),
@@ -453,8 +463,8 @@ def _apply_settings(payload):
     merged = _public_settings({**current, **incoming})
 
     mail_provider = str(merged["mail_provider"] or "yunxin").strip().lower()
-    if mail_provider not in {"yunxin", "yyds"}:
-        raise ValueError("邮箱提供方只能是 yunxin 或 yyds")
+    if mail_provider not in {"yunxin", "yyds", "cloudflare_temp"}:
+        raise ValueError("邮箱提供方只能是 yunxin、yyds 或 cloudflare_temp")
     captcha_provider = str(merged["captcha_provider"] or "2captcha").strip().lower()
     if captcha_provider not in {"2captcha", "yescaptcha", "capmonster", "browser"}:
         raise ValueError("打码方式只能是 2captcha、yescaptcha、capmonster 或 browser")
@@ -470,6 +480,7 @@ def _apply_settings(payload):
     mail_keys = {
         "mail_provider", "mail_api_base", "mail_api_key", "mail_type", "mail_suffix",
         "mail_domain", "yyds_api_key", "yyds_domain",
+        "cf_temp_base", "cf_temp_admin_key", "cf_temp_domain",
     }
     captcha_keys = {
         "captcha_provider", "captcha_api_key", "captcha_api_base", "captcha_timeout",
@@ -492,8 +503,18 @@ def _apply_settings(payload):
         next_config["mail_domain"] = str(merged["mail_domain"] or "").strip()
         next_config["yyds_api_key"] = str(merged["yyds_api_key"] or "").strip()
         next_config["yyds_domain"] = str(merged["yyds_domain"] or "").strip()
+        next_config["cf_temp_base"] = _clean_url(merged["cf_temp_base"], "CloudTemp API 地址")
+        next_config["cf_temp_admin_key"] = str(merged["cf_temp_admin_key"] or "").strip()
+        cf_temp_domain = str(merged["cf_temp_domain"] or "").strip().lower()
+        if cf_temp_domain == "auto":
+            cf_temp_domain = ""
+        next_config["cf_temp_domain"] = cf_temp_domain
         if mail_provider == "yunxin" and not next_config["mail_api_base"]:
             raise ValueError("云芯邮箱需要填写 API 地址")
+        if mail_provider == "cloudflare_temp" and (
+            not next_config["cf_temp_base"] or not next_config["cf_temp_admin_key"]
+        ):
+            raise ValueError("CloudTemp 需要填写 API 地址和 Admin Key")
     if captcha_touch:
         next_config["captcha_provider"] = captcha_provider
         next_config["captcha_api_key"] = str(merged["captcha_api_key"] or "").strip()
@@ -2430,6 +2451,388 @@ def put_settings():
     if group == "quality" or (set(payload) & set(QUALITY_FLAT_KEYS)):
         _quality_inventory(persist=True)
     return jsonify(response)
+
+
+MAIL_PROVIDER_LABELS = {
+    "yunxin": "云芯 Yunxin",
+    "yyds": "YYDS Mail",
+    "cloudflare_temp": "CloudTemp",
+}
+
+
+def _mail_provider_ready(provider, config):
+    """检查某服务的必填配置是否齐全，返回 (ok, message)。"""
+    provider = str(provider or "").strip().lower()
+    if provider == "yunxin":
+        if not str(config.get("mail_api_base") or "").strip():
+            return False, "云芯邮箱需要先填写 API 地址"
+        return True, ""
+    if provider == "yyds":
+        if not str(config.get("yyds_api_key") or "").strip():
+            return False, "YYDS Mail 需要先填写 API Key"
+        return True, ""
+    if provider == "cloudflare_temp":
+        base = str(config.get("cf_temp_base") or "").strip()
+        admin = str(config.get("cf_temp_admin_key") or "").strip()
+        if not base or not admin:
+            return False, "CloudTemp 需要先填写 API 地址和 Admin Key"
+        return True, ""
+    return False, f"未知邮箱服务: {provider}"
+
+
+def _cf_temp_headers(admin_key, jwt=""):
+    headers = {"Content-Type": "application/json", "x-custom-auth": admin_key}
+    if jwt:
+        headers["Authorization"] = f"Bearer {jwt}"
+    return headers
+
+
+def _cf_temp_discover_domains(base, admin_key):
+    """从 Cloudflare Temp Worker 拉取可用域名列表（参照 grok-slim-register1）。"""
+    last_err = ""
+    settings = {}
+    for path in ("/open_api/settings", "/open_api/open_settings", "/api/open_settings"):
+        try:
+            r = requests.get(base + path, headers=_cf_temp_headers(admin_key), timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, dict):
+                    settings = data
+                    break
+            last_err = f"{path} -> {r.status_code}"
+        except Exception as exc:
+            last_err = str(exc)
+    if not settings:
+        return {"ok": False, "domains": [], "message": f"拉取域名失败: {last_err or '无响应'}"}
+    domains = []
+    for key in ("domains", "defaultDomains", "randomSubdomainDomains"):
+        value = settings.get(key) or []
+        if isinstance(value, list):
+            for item in value:
+                text = str(item).strip().lower()
+                if text and text not in domains:
+                    domains.append(text)
+    return {
+        "ok": True,
+        "domains": domains,
+        "message": f"已拉取 {len(domains)} 个域名" if domains else "接口无域名列表",
+    }
+
+
+def _yyds_discover_domains(api_key):
+    """从 YYDS Mail 拉取可用域名与平台列表。"""
+    base = "https://maliapi.215.im/v1"
+    headers = {"X-API-Key": api_key}
+    try:
+        r = requests.get(f"{base}/domains", headers=headers, timeout=15)
+        data = r.json() if r.status_code == 200 else {}
+        raw = data if isinstance(data, list) else (data.get("data") or data.get("domains") or [])
+        domains = []
+        for item in raw if isinstance(raw, list) else []:
+            name = str(item.get("domain") or item.get("name") or "") if isinstance(item, dict) else str(item)
+            name = name.strip().lower()
+            if name:
+                domains.append(name)
+        platforms = []
+        try:
+            pr = requests.get(f"{base}/platforms", headers=headers, timeout=15)
+            pdata = pr.json() if pr.status_code == 200 else {}
+            praw = pdata if isinstance(pdata, list) else (pdata.get("data") or pdata.get("platforms") or [])
+            for item in praw if isinstance(praw, list) else []:
+                code = str(item.get("code") or item.get("platformCode") or item.get("name") or "") if isinstance(item, dict) else str(item)
+                code = code.strip()
+                if code:
+                    platforms.append(code)
+        except Exception:
+            pass
+        return {
+            "ok": r.status_code == 200 and bool(domains),
+            "domains": domains,
+            "platforms": platforms,
+            "message": f"已拉取 {len(domains)} 个域名" if domains else ("YYDS API Key 无效或无可用域名" if r.status_code in (401, 403) else "拉取域名失败"),
+        }
+    except Exception as exc:
+        return {"ok": False, "domains": [], "platforms": [], "message": str(exc)}
+
+
+def _mail_test_connection(provider, config):
+    """真实调一次建邮接口验证配置，返回 (ok, message)。"""
+    provider = str(provider or "").strip().lower()
+    if provider == "cloudflare_temp":
+        base = str(config.get("cf_temp_base") or "").strip().rstrip("/")
+        admin = str(config.get("cf_temp_admin_key") or "").strip()
+        if not base or not admin:
+            return False, "CloudTemp 需要先填写 API 地址和 Admin Key"
+        try:
+            payload = {"name": "nodes" + secrets.token_hex(4).lower()}
+            domain = str(config.get("cf_temp_domain") or "").strip()
+            if domain and domain.lower() != "auto":
+                payload["domain"] = domain
+            r = requests.post(
+                f"{base}/admin/new_address",
+                headers={"x-admin-auth": admin, "Content-Type": "application/json"},
+                json=payload, timeout=20,
+            )
+            r.raise_for_status()
+            data = r.json()
+            address = str(data.get("address") or data.get("email") or "").strip()
+            jwt = str(data.get("jwt") or data.get("token") or "").strip()
+            if not address:
+                return False, f"建邮响应缺少 address: {str(data)[:150]}"
+            # 删掉测试邮箱（尽力而为）
+            deleted = False
+            if jwt:
+                try:
+                    dr = requests.delete(
+                        f"{base}/api/delete_address",
+                        headers={"x-custom-auth": admin, "x-admin-auth": admin, "Authorization": f"Bearer {jwt}"},
+                        timeout=15,
+                    )
+                    deleted = dr.status_code == 200
+                except Exception:
+                    deleted = False
+            return True, "建邮成功" + ("，测试邮箱已清理" if deleted else "（测试邮箱清理失败，可忽略）")
+        except Exception as exc:
+            return False, f"CloudTemp 建邮失败: {str(exc)[:200]}"
+    if provider == "yyds":
+        api_key = str(config.get("yyds_api_key") or "").strip()
+        if not api_key:
+            return False, "YYDS Mail 需要先填写 API Key"
+        result = _yyds_discover_domains(api_key)
+        if result["ok"]:
+            return True, f"YYDS 连接正常，{result['message']}"
+        return False, f"YYDS 连接失败: {result['message']}"
+    if provider == "yunxin":
+        base = str(config.get("mail_api_base") or "").strip().rstrip("/")
+        api_key = str(config.get("mail_api_key") or "").strip()
+        if not base:
+            return False, "云芯邮箱需要先填写 API 地址"
+        try:
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["X-API-Key"] = api_key
+            r = requests.get(f"{base}/api/v1/mails", headers=headers, params={"limit": 1}, timeout=15)
+            if r.status_code == 200:
+                return True, "云芯接口连接正常"
+            return False, f"云芯接口返回 {r.status_code}"
+        except Exception as exc:
+            return False, f"云芯连接失败: {str(exc)[:200]}"
+    return False, f"未知邮箱服务: {provider}"
+
+
+@app.post("/api/mail/activate")
+def mail_activate():
+    payload = request.get_json(silent=True) or {}
+    provider = str(payload.get("provider") or "").strip().lower()
+    if provider not in {"yunxin", "yyds", "cloudflare_temp"}:
+        return jsonify({"error": "未知邮箱服务"}), 400
+    if TASK_STORE.active():
+        return jsonify({"error": "有注册任务正在运行，请结束后再切换服务"}), 409
+    config = _read_config()
+    ok, message = _mail_provider_ready(provider, config)
+    if not ok:
+        return jsonify({"error": message}), 400
+    next_config = dict(config)
+    next_config["mail_provider"] = provider
+    _atomic_json(CONFIG_FILE, next_config)
+    if hasattr(worker, "reload_settings"):
+        worker.reload_settings()
+    return jsonify({
+        "ok": True,
+        "provider": provider,
+        "label": MAIL_PROVIDER_LABELS.get(provider, provider),
+        "message": f"已切换到 {MAIL_PROVIDER_LABELS.get(provider, provider)}",
+    })
+
+
+@app.get("/api/mail/domains")
+def mail_domains_fetch():
+    provider = str(request.args.get("provider") or "").strip().lower()
+    config = _read_config()
+    ok, message = _mail_provider_ready(provider, config)
+    if not ok:
+        return jsonify({"ok": False, "domains": [], "message": message}), 400
+    if provider == "cloudflare_temp":
+        result = _cf_temp_discover_domains(
+            str(config.get("cf_temp_base") or "").strip().rstrip("/"),
+            str(config.get("cf_temp_admin_key") or "").strip(),
+        )
+        return jsonify(result)
+    if provider == "yyds":
+        result = _yyds_discover_domains(str(config.get("yyds_api_key") or "").strip())
+        return jsonify(result)
+    # yunxin 没有域名列表接口
+    suffix = str(config.get("mail_suffix") or "").strip()
+    return jsonify({
+        "ok": True,
+        "domains": [suffix] if suffix else [],
+        "message": f"云芯无域名接口，使用邮箱后缀 {suffix}" if suffix else "云芯无域名接口，请填写邮箱后缀",
+    })
+
+
+@app.post("/api/mail/test")
+def mail_test():
+    payload = request.get_json(silent=True) or {}
+    provider = str(payload.get("provider") or "").strip().lower()
+    if provider not in {"yunxin", "yyds", "cloudflare_temp"}:
+        return jsonify({"ok": False, "message": "未知邮箱服务"}), 400
+    fn = getattr(worker, "mail_test_connection", None)
+    try:
+        ok, message = fn(provider) if fn else _mail_test_connection(provider, _read_config())
+    except Exception as exc:
+        ok, message = False, str(exc)[:200]
+    return jsonify({"ok": bool(ok), "provider": provider, "message": str(message)})
+
+
+# ── CloudTemp 域名池 ──────────────────────────────────────
+
+@app.get("/api/mail/pool")
+def mail_pool_list():
+    data = get_domain_pool().list_public(
+        page=request.args.get("page", 1, type=int),
+        per_page=request.args.get("per_page", 50, type=int),
+        query=request.args.get("q", "", type=str),
+        status=request.args.get("status", "", type=str),
+    )
+    return jsonify({"ok": True, **data})
+
+
+@app.post("/api/mail/pool")
+def mail_pool_add():
+    body = request.get_json(silent=True) or {}
+    values = body.get("domains")
+    if not isinstance(values, list):
+        values = [body.get("domain")]
+    try:
+        if body.get("replace"):
+            if TASK_STORE.active():
+                return jsonify({"error": "任务运行中不能整体替换域名列表"}), 409
+            result = get_domain_pool().reconcile_configured([str(x or "") for x in values])
+            message = (
+                f"域名列表已生效：启用 {result['active']}，新增 {result['added']}，停用旧域 {result['disabled']}"
+            )
+        else:
+            if TASK_STORE.active():
+                return jsonify({"error": "任务运行中不能添加新域名，可启停已有域名"}), 409
+            result = get_domain_pool().add([str(x or "") for x in values], enabled=True)
+            message = f"导入完成：新增 {result['added']}，已存在 {result['duplicates']}，无效 {result['invalid']}"
+        return jsonify({"ok": True, **result, "message": message})
+    except DomainPoolError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.patch("/api/mail/pool/<domain_id>")
+def mail_pool_update(domain_id):
+    values = request.get_json(silent=True) or {}
+    try:
+        item = get_domain_pool().update(domain_id, values)
+        return jsonify({"ok": True, "item": item})
+    except KeyError:
+        return jsonify({"error": "域名不存在"}), 404
+    except DomainPoolError as exc:
+        return jsonify({"error": str(exc)}), 409
+
+
+@app.post("/api/mail/pool/bulk")
+def mail_pool_bulk():
+    body = request.get_json(silent=True) or {}
+    ids = [str(x) for x in (body.get("ids") or [])]
+    action = str(body.get("action") or "")
+    if not ids:
+        return jsonify({"error": "请选择域名"}), 400
+    if action not in {"enable", "disable", "delete"}:
+        return jsonify({"error": "批量操作无效"}), 400
+    if action == "delete":
+        if TASK_STORE.active():
+            return jsonify({"error": "任务运行中不能删除域名"}), 409
+        result = get_domain_pool().delete(ids)
+        return jsonify({"ok": True, **result, "message": f"已永久删除 {result['removed']} 个域名及其历史"})
+    changed = failed = 0
+    errors = []
+    for domain_id in ids[:2000]:
+        try:
+            get_domain_pool().update(domain_id, {"enabled": action == "enable"})
+            changed += 1
+        except Exception as exc:
+            failed += 1
+            errors.append({"id": domain_id, "message": str(exc)})
+    return jsonify({"ok": True, "changed": changed, "failed": failed, "errors": errors[:100]})
+
+
+@app.post("/api/mail/pool/move")
+def mail_pool_move():
+    body = request.get_json(silent=True) or {}
+    domain_id = str(body.get("id") or "")
+    direction = str(body.get("direction") or "")
+    if not domain_id or direction not in {"up", "down"}:
+        return jsonify({"error": "参数无效"}), 400
+    if TASK_STORE.active():
+        return jsonify({"error": "任务运行中不能调整域名顺序"}), 409
+    try:
+        get_domain_pool().move(domain_id, direction)
+        return jsonify({"ok": True})
+    except KeyError:
+        return jsonify({"error": "域名不存在"}), 404
+
+
+@app.post("/api/mail/pool/test")
+def mail_pool_test():
+    body = request.get_json(silent=True) or {}
+    ids = body.get("ids") or []
+    if not isinstance(ids, list) or not ids:
+        return jsonify({"error": "请选择要测试的域名"}), 400
+    ids = [str(x) for x in ids[:2000]]
+    config = _read_config()
+    base = str(config.get("cf_temp_base") or "").strip().rstrip("/")
+    admin = str(config.get("cf_temp_admin_key") or "").strip()
+    if not base or not admin:
+        return jsonify({"error": "CloudTemp 需要先填写 API 地址和 Admin Key"}), 400
+
+    def test_one(domain_id):
+        try:
+            row = get_domain_pool().get_public(domain_id)
+        except KeyError:
+            return {"id": domain_id, "ok": False, "message": "域名不存在"}
+        domain = row["domain"]
+        try:
+            r = requests.post(
+                f"{base}/admin/new_address",
+                headers={"x-admin-auth": admin, "Content-Type": "application/json"},
+                json={"name": "t" + secrets.token_hex(4).lower(), "domain": domain},
+                timeout=20,
+            )
+            r.raise_for_status()
+            data = r.json()
+            address = str(data.get("address") or data.get("email") or "").strip()
+            jwt = str(data.get("jwt") or data.get("token") or "").strip()
+            ok = bool(address) and address.lower().endswith("." + domain)
+            message = "建邮成功" if ok else (f"建邮响应异常: {str(data)[:120]}" if not address else f"域名不匹配: {address}")
+            if address and jwt:
+                try:
+                    requests.delete(
+                        f"{base}/api/delete_address",
+                        headers={"x-custom-auth": admin, "x-admin-auth": admin, "Authorization": f"Bearer {jwt}"},
+                        timeout=15,
+                    )
+                except Exception:
+                    pass
+            get_domain_pool().set_email_health(domain_id, ok=ok, message=message)
+            return {"id": domain_id, "domain": domain, "ok": ok, "message": message}
+        except Exception as exc:
+            message = str(exc)[:200]
+            get_domain_pool().set_email_health(domain_id, ok=False, message=message)
+            return {"id": domain_id, "domain": domain, "ok": False, "message": message}
+
+    with ThreadPoolExecutor(max_workers=min(8, len(ids))) as executor:
+        results = list(executor.map(test_one, ids))
+    passed = sum(1 for x in results if x["ok"])
+    return jsonify({
+        "ok": True,
+        "passed": passed,
+        "total": len(results),
+        "all_passed": passed == len(results),
+        "results": results,
+    })
 
 
 @app.post("/api/quality/dry-run")

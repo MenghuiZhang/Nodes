@@ -1958,3 +1958,221 @@ td.empty-cell {
     padding: 2rem 1.5rem;
   }
 }
+
+/* ==========================================================================
+   Mail Provider Cards & CloudTemp Domain Pool
+   ========================================================================== */
+.mail-provider-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  padding: 1.1rem 1.35rem 0.4rem;
+}
+
+.provider-card {
+  position: relative;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 0.85rem;
+  background: #ffffff;
+  padding: 0.85rem 1rem;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+
+.provider-card:hover {
+  border-color: var(--brand);
+  background: #f7fbff;
+  box-shadow: 0 3px 12px rgba(37, 116, 235, 0.08);
+}
+
+.provider-card.selected {
+  border-color: var(--brand);
+  background: #f5f9ff;
+  box-shadow: 0 0 0 1px var(--brand), 0 3px 12px rgba(37, 116, 235, 0.1);
+}
+
+.provider-card.active::after {
+  content: "✓ 当前启用";
+  position: absolute;
+  top: -0.65rem;
+  right: 0.65rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #169c62 0%, #0f7a4b 100%);
+  color: #ffffff;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  box-shadow: 0 2px 6px rgba(22, 156, 98, 0.35);
+}
+
+.provider-card h3 {
+  margin: 0 0 0.2rem;
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.provider-card p {
+  margin: 0;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  line-height: 1.45;
+}
+
+.provider-form {
+  display: grid;
+  gap: 0.95rem;
+}
+
+.mail-actions {
+  padding-top: 0.25rem;
+}
+
+.input-with-buttons {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.input-with-buttons input {
+  flex: 1;
+  min-width: 0;
+}
+
+.secondary-button.mini {
+  height: 1.9rem;
+  padding: 0 0.65rem;
+  font-size: 0.72rem;
+  border-radius: 0.5rem;
+}
+
+.flex-spacer {
+  flex: 1;
+}
+
+/* CloudTemp 域名池 */
+.domain-pool {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.9rem;
+  border: 1px solid rgba(34, 30, 24, 0.09);
+  border-radius: 0.8rem;
+  background: #faf8f3;
+}
+
+.domain-pool-toolbar,
+.domain-pool-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.domain-pool-title {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.domain-pool-summary {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.domain-pool-search,
+.domain-pool-status,
+.domain-pool-new {
+  height: 1.9rem;
+  padding: 0 0.6rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 0.5rem;
+  background: #ffffff;
+  font-size: 0.74rem;
+  color: var(--ink);
+}
+
+.domain-pool-search {
+  width: 11rem;
+}
+
+.domain-pool-new {
+  flex: 1;
+  min-width: 12rem;
+}
+
+.domain-pool-page {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+  min-width: 3.2rem;
+  text-align: center;
+}
+
+.domain-pool-table {
+  max-height: 20rem;
+  overflow-y: auto;
+  background: #ffffff;
+}
+
+.domain-pool-table td {
+  font-size: 0.74rem;
+}
+
+.domain-pool-table .domain-name {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.domain-pool-table .domain-muted {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.pool-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.64rem;
+  font-weight: 700;
+}
+
+.pool-badge.enabled {
+  background: rgba(22, 156, 98, 0.12);
+  color: #0f7a4b;
+}
+
+.pool-badge.disabled {
+  background: rgba(110, 103, 91, 0.12);
+  color: var(--muted);
+}
+
+.pool-badge.healthy {
+  background: rgba(22, 156, 98, 0.12);
+  color: #0f7a4b;
+}
+
+.pool-badge.unhealthy {
+  background: rgba(225, 29, 72, 0.1);
+  color: var(--rose-600);
+}
+
+.pool-badge.untested {
+  background: rgba(110, 103, 91, 0.1);
+  color: var(--muted);
+}
+
+.pool-badge.cooling {
+  background: rgba(217, 119, 6, 0.12);
+  color: #b45309;
+}
+
+@media (max-width: 900px) {
+  .mail-provider-cards {
+    grid-template-columns: 1fr;
+  }
+}

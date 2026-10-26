@@ -492,27 +492,96 @@
 
           <div class="settings-tab" id="settings-tab-mail">
             <section class="panel page-panel">
-              <div class="panel-heading"><div><h2>邮箱服务</h2><p>云芯 / YYDS 收信配置</p></div></div>
+              <div class="panel-heading">
+                <div><h2>邮箱服务</h2><p>云芯 / YYDS / CloudTemp 收信配置</p></div>
+                <span class="status-chip ready" id="mailActiveBadge">—</span>
+              </div>
+              <div class="mail-provider-cards" id="mailProviderCards"></div>
               <form id="mailSettingsForm" class="settings-form">
-                <div class="form-grid">
-                  <label><span>邮箱提供方</span>
-                    <select id="mail_provider">
-                      <option value="yunxin">云芯 Yunxin</option>
-                      <option value="yyds">YYDS Mail</option>
-                    </select>
-                  </label>
-                  <label><span>邮箱类型</span><input id="mail_type" placeholder="mail"></label>
-                  <label><span>邮箱后缀</span><input id="mail_suffix" placeholder="mail.com"></label>
-                  <label><span>指定域名</span><input id="mail_domain" placeholder="可空"></label>
+                <input type="hidden" id="mail_provider" value="yunxin">
+                <!-- 云芯 Yunxin -->
+                <div class="provider-form" id="form-yunxin">
+                  <div class="form-grid">
+                    <label><span>云芯 API 地址</span><input id="mail_api_base" placeholder="https://mail.example.com"></label>
+                    <label><span>云芯 API Key</span><input id="mail_api_key" placeholder="mail_api_key"></label>
+                    <label><span>邮箱类型</span><input id="mail_type" placeholder="mail"></label>
+                    <label><span>指定域名</span><input id="mail_domain" placeholder="可空，覆盖邮箱后缀"></label>
+                    <label><span>邮箱后缀</span><input id="mail_suffix" placeholder="mail.com"></label>
+                  </div>
+                  <p class="settings-hint">自建云芯邮箱 API：建邮 POST /api/v1/mailboxes，收码轮询 /api/v1/mails。</p>
                 </div>
-                <label><span>云芯 API 地址</span><input id="mail_api_base" placeholder="https://mail.example.com"></label>
-                <label><span>云芯 API Key</span><input id="mail_api_key" placeholder="mail_api_key"></label>
-                <div class="form-grid">
-                  <label><span>YYDS API Key</span><input id="yyds_api_key" placeholder="可空，提供方为 YYDS 时必填"></label>
-                  <label><span>YYDS 域名</span><input id="yyds_domain" placeholder="可空"></label>
+                <!-- YYDS Mail -->
+                <div class="provider-form" id="form-yyds" hidden>
+                  <div class="form-grid">
+                    <label><span>YYDS API Key</span><input id="yyds_api_key" placeholder="提供方为 YYDS 时必填"></label>
+                    <label><span>YYDS 域名</span>
+                      <span class="input-with-buttons">
+                        <input id="yyds_domain" list="yydsDomainList" placeholder="可空，拉取域名后可下拉选择">
+                        <button type="button" class="secondary-button mini" id="yydsRandomDomain">随机挑选</button>
+                      </span>
+                      <datalist id="yydsDomainList"></datalist>
+                    </label>
+                  </div>
+                  <p class="settings-hint">YYDS Mail（maliapi.215.im/v1）：建邮 POST /accounts，收码轮询 /messages。</p>
                 </div>
-                <div class="settings-actions">
+                <!-- CloudTemp -->
+                <div class="provider-form" id="form-cloudflare_temp" hidden>
+                  <div class="form-grid">
+                    <label><span>CloudTemp API 地址</span><input id="cf_temp_base" placeholder="https://your-worker.example.com"></label>
+                    <label><span>CloudTemp Admin Key</span><input id="cf_temp_admin_key" placeholder="x-admin-auth 密钥"></label>
+                    <label><span>指定域名</span>
+                      <span class="input-with-buttons">
+                        <input id="cf_temp_domain" list="cfTempDomainList" placeholder="可空 = 从域名池随机轮换">
+                        <button type="button" class="secondary-button mini" id="cfTempRandomDomain">随机挑选</button>
+                      </span>
+                      <datalist id="cfTempDomainList"></datalist>
+                    </label>
+                  </div>
+                  <p class="settings-hint">Cloudflare Temp Email（自建 Worker 管理员 API）：指定域名留空时从下方域名池随机轮换，连败 3 次的域名冷却 5 分钟垫底。</p>
+                  <div class="domain-pool" id="domainPoolSection">
+                    <div class="domain-pool-toolbar">
+                      <span class="domain-pool-title">域名池</span>
+                      <span class="domain-pool-summary" id="domainPoolSummary">—</span>
+                      <span class="flex-spacer"></span>
+                      <input id="domainPoolQuery" placeholder="搜索域名…" class="domain-pool-search">
+                      <select id="domainPoolStatus" class="domain-pool-status">
+                        <option value="">全部状态</option>
+                        <option value="enabled">启用</option>
+                        <option value="disabled">停用</option>
+                      </select>
+                      <button type="button" class="secondary-button mini" id="domainPoolRefresh">刷新</button>
+                    </div>
+                    <div class="domain-pool-actions">
+                      <input id="domainPoolNew" placeholder="手动添加域名，如 mail.example.com" class="domain-pool-new">
+                      <button type="button" class="secondary-button mini" id="domainPoolAdd">添加</button>
+                      <button type="button" class="secondary-button mini" id="domainPoolImport">导入拉取的域名</button>
+                    </div>
+                    <div class="table-wrap domain-pool-table">
+                      <table>
+                        <thead><tr>
+                          <th><input type="checkbox" id="domainPoolCheckAll"></th>
+                          <th>域名</th><th>状态</th><th>健康</th><th>成功</th><th>失败</th><th>最近失败</th><th>操作</th>
+                        </tr></thead>
+                        <tbody id="domainPoolBody"></tbody>
+                      </table>
+                    </div>
+                    <div class="domain-pool-toolbar">
+                      <button type="button" class="secondary-button mini" id="domainPoolEnable">批量启用</button>
+                      <button type="button" class="secondary-button mini" id="domainPoolDisable">批量停用</button>
+                      <button type="button" class="secondary-button mini" id="domainPoolDelete">批量删除</button>
+                      <button type="button" class="secondary-button mini" id="domainPoolTest">测试选中</button>
+                      <span class="flex-spacer"></span>
+                      <button type="button" class="secondary-button mini" id="domainPoolPrev">上一页</button>
+                      <span class="domain-pool-page" id="domainPoolPage">1 / 1</span>
+                      <button type="button" class="secondary-button mini" id="domainPoolNext">下一页</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="settings-actions-inline mail-actions">
                   <button class="primary-button settings-save" type="submit">保存邮箱设置</button>
+                  <button class="secondary-button" type="button" id="mailActivateButton">设为当前服务</button>
+                  <button class="secondary-button" type="button" id="mailFetchDomainsButton">拉取域名</button>
+                  <button class="secondary-button" type="button" id="mailTestButton">测试连接</button>
                 </div>
               </form>
             </section>

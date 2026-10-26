@@ -64,6 +64,13 @@ MAIL_DOMAIN = str(_setting("mail_domain", "MAIL_DOMAIN")).strip()
 YYDS_BASE = "https://maliapi.215.im/v1"
 YYDS_KEY = str(_setting("yyds_api_key", "YYDS_API_KEY")).strip()
 YYDS_DOMAIN = str(_setting("yyds_domain", "YYDS_DOMAIN")).strip()
+
+# Cloudflare Temp Email（CloudTemp）
+CF_TEMP_BASE = str(_setting("cf_temp_base", "CF_TEMP_BASE", "")).strip().rstrip("/")
+CF_TEMP_ADMIN_KEY = str(_setting("cf_temp_admin_key", "CF_TEMP_ADMIN_KEY")).strip()
+CF_TEMP_DOMAIN = str(_setting("cf_temp_domain", "CF_TEMP_DOMAIN", "")).strip().lower()
+if CF_TEMP_DOMAIN == "auto":
+    CF_TEMP_DOMAIN = ""
 _CF_LAST_JWT = ""
 
 # Turnstile solver. When a 2Captcha key is configured, use its API by default;
@@ -191,6 +198,7 @@ def reload_settings():
     """Re-read config.local.json into module globals after the dashboard saves."""
     global _LOCAL_CONFIG, MAIL_PROVIDER, MAIL_API_BASE, MAIL_API_KEY, MAIL_TYPE
     global MAIL_SUFFIX, MAIL_DOMAIN, YYDS_KEY, YYDS_DOMAIN, CAPTCHA_API_KEY
+    global CF_TEMP_BASE, CF_TEMP_ADMIN_KEY, CF_TEMP_DOMAIN
     global CAPTCHA_PROVIDER, CAPTCHA_API_BASE, CAPTCHA_TIMEOUT, CAPTCHA_POLL_INTERVAL
     _LOCAL_CONFIG = _load_local_config()
     MAIL_PROVIDER = str(_setting("mail_provider", "MAIL_PROVIDER")).strip().lower()
@@ -203,6 +211,11 @@ def reload_settings():
     MAIL_DOMAIN = str(_setting("mail_domain", "MAIL_DOMAIN")).strip()
     YYDS_KEY = str(_setting("yyds_api_key", "YYDS_API_KEY")).strip()
     YYDS_DOMAIN = str(_setting("yyds_domain", "YYDS_DOMAIN")).strip()
+    CF_TEMP_BASE = str(_setting("cf_temp_base", "CF_TEMP_BASE", "")).strip().rstrip("/")
+    CF_TEMP_ADMIN_KEY = str(_setting("cf_temp_admin_key", "CF_TEMP_ADMIN_KEY")).strip()
+    CF_TEMP_DOMAIN = str(_setting("cf_temp_domain", "CF_TEMP_DOMAIN", "")).strip().lower()
+    if CF_TEMP_DOMAIN == "auto":
+        CF_TEMP_DOMAIN = ""
     CAPTCHA_API_KEY = str(_setting("captcha_api_key", "CAPTCHA_API_KEY")).strip()
     CAPTCHA_PROVIDER = str(_setting(
         "captcha_provider", "CAPTCHA_PROVIDER",
@@ -341,36 +354,83 @@ def yyds_wait_code(address, timeout=180, interval=5):
 
 # ── Cloudflare Temp Email（自建Worker，管理员API）────────
 def _cf_temp_config():
-    base = str(_setting("cf_temp_base", "CF_TEMP_BASE", "")).strip().rstrip("/")
-    admin = str(_setting("cf_temp_admin_key", "CF_TEMP_ADMIN_KEY", "")).strip()
+    base = str(CF_TEMP_BASE or _setting("cf_temp_base", "CF_TEMP_BASE", "")).strip().rstrip("/")
+    admin = str(CF_TEMP_ADMIN_KEY or _setting("cf_temp_admin_key", "CF_TEMP_ADMIN_KEY", "")).strip()
     if not base or not admin:
         raise RuntimeError("未配置 cf_temp_base / cf_temp_admin_key")
     return base, admin
 
 
+def _cf_temp_domain_candidates():
+    """指定域名优先，否则从域名池随机轮换（冷却域名垫底）。
+
+    域名池为空且未指定域名时返回 [""]，由 Worker 自己分配域名。
+    """
+    manual = str(CF_TEMP_DOMAIN or _setting("cf_temp_domain", "CF_TEMP_DOMAIN", "")).strip().lower()
+    if manual == "auto":
+        manual = ""
+    if manual:
+        return [manual]
+    try:
+        from mail_domain_pool import get_domain_pool
+        candidates = get_domain_pool().pick_domains()
+    except Exception:
+        candidates = []
+    return candidates or [""]
+
+
 def cf_temp_create_mailbox():
-    """管理员 API 建邮：POST /admin/new_address。返回 (address, jwt)。"""
+    """管理员 API 建邮：POST /admin/new_address。返回 (address, jwt)。
+
+    未指定域名时按域名池随机轮换：一个域名连败即换下一个，
+    并把结果记回域名池（连败 3 次冷却 300 秒垫底）。
+    """
     global _CF_LAST_JWT
     base, admin = _cf_temp_config()
-    domain = str(_setting("cf_temp_domain", "CF_TEMP_DOMAIN", "")).strip()
+    candidates = _cf_temp_domain_candidates()
+    errors = []
 
-    def _do():
-        payload = {"name": random_mailbox_local()}
-        if domain and domain.lower() != "auto":
-            payload["domain"] = domain
-        r = requests.post(f"{base}/admin/new_address",
-                          headers={"x-admin-auth": admin, "Content-Type": "application/json"},
-                          json=payload, timeout=20)
-        r.raise_for_status()
-        return r.json()
-    d = _retry(_do, tries=3, what="建邮箱(cf_temp)")
-    email = d.get("address") or d.get("email")
-    jwt = d.get("jwt") or d.get("token") or email
-    if not email or not jwt:
-        raise RuntimeError(f"cf_temp 建邮响应缺 address/jwt: {str(d)[:150]}")
-    _CF_LAST_JWT = jwt
-    log(f"临时邮箱: {email}")
-    return email, jwt
+    for domain in candidates[:10]:
+        def _do():
+            payload = {"name": random_mailbox_local()}
+            if domain:
+                payload["domain"] = domain
+            r = requests.post(f"{base}/admin/new_address",
+                              headers={"x-admin-auth": admin, "Content-Type": "application/json"},
+                              json=payload, timeout=20)
+            r.raise_for_status()
+            return r.json()
+        try:
+            d = _retry(_do, tries=2, what="建邮箱(cf_temp)")
+        except Exception as exc:
+            errors.append(f"{domain or '(auto)'}: {str(exc)[:120]}")
+            log(f"[!] cf_temp 域名 {domain or '(auto)'} 建邮失败: {errors[-1]}")
+            _cf_temp_record_result(domain, False, errors[-1])
+            continue
+        email = d.get("address") or d.get("email")
+        jwt = d.get("jwt") or d.get("token") or email
+        if not email or not jwt:
+            errors.append(f"{domain or '(auto)'}: 建邮响应缺 address/jwt: {str(d)[:120]}")
+            log(f"[!] cf_temp 域名 {domain or '(auto)'} {errors[-1]}")
+            _cf_temp_record_result(domain, False, errors[-1])
+            continue
+        _cf_temp_record_result(domain, True, "创邮成功")
+        _CF_LAST_JWT = jwt
+        log(f"临时邮箱: {email}")
+        return email, jwt
+
+    raise RuntimeError("cf_temp 所有候选域名建邮失败: " + ("; ".join(errors) or "无可用域名"))
+
+
+def _cf_temp_record_result(domain, ok, message):
+    """把创邮结果记回域名池（手动指定域名/域名不在池内时静默忽略）。"""
+    if not domain:
+        return
+    try:
+        from mail_domain_pool import get_domain_pool
+        get_domain_pool().record_create_result(domain, ok, message)
+    except Exception:
+        pass
 
 
 def cf_temp_wait_code(address, jwt=None, timeout=180, interval=5):
@@ -495,6 +555,20 @@ def create_mailbox():
     if MAIL_PROVIDER in {"yunxin", "qingyi", "custom"}:
         return yunxin_create_mailbox()
     raise RuntimeError(f"不支持的邮箱服务: {MAIL_PROVIDER}")
+
+
+def record_register_result(email, ok, message=""):
+    """把整轮注册成败记到邮箱域名上（仅 CloudTemp 域名池内的域名生效）。"""
+    if not email:
+        return
+    try:
+        from mail_domain_pool import get_domain_pool
+        if ok:
+            get_domain_pool().record_register_success(email)
+        else:
+            get_domain_pool().record_register_failure(email, message)
+    except Exception:
+        pass
 
 
 def wait_mail_code(address, timeout=180, interval=5):
@@ -1342,8 +1416,10 @@ def register_one(idx, headless, acc_file, node_file, max_attempts=3):
             last = rec
             if rec.get("proxy_count", 0) > 0:
                 save_account(rec, acc_file)
+                record_register_result(rec.get("email"), True)
                 log(f"[✓] 完成  verified={rec['verified']}  proxies={rec['proxy_count']}  {rec['email']}")
                 return rec
+            record_register_result(rec.get("email"), False, "注册成功但未拿到代理")
             log("注册成功但未拿到代理，换邮箱重试")
 
     if last:
@@ -1352,6 +1428,62 @@ def register_one(idx, headless, acc_file, node_file, max_attempts=3):
     else:
         log(f"[x] {max_attempts} 次尝试均失败，放弃 #{idx}")
     return last
+
+
+def mail_test_connection(provider=None):
+    """供 dashboard「测试连接」调用：真实调一次建邮/拉域名接口验证配置。"""
+    provider = str(provider or MAIL_PROVIDER or "").strip().lower()
+    if provider == "cloudflare_temp":
+        base, admin = _cf_temp_config()
+        try:
+            payload = {"name": "nodes" + "".join(random.choices(string.ascii_lowercase, k=8))}
+            if CF_TEMP_DOMAIN:
+                payload["domain"] = CF_TEMP_DOMAIN
+            r = requests.post(f"{base}/admin/new_address",
+                              headers={"x-admin-auth": admin, "Content-Type": "application/json"},
+                              json=payload, timeout=20)
+            r.raise_for_status()
+            data = r.json()
+            address = str(data.get("address") or data.get("email") or "").strip()
+            jwt = str(data.get("jwt") or data.get("token") or "").strip()
+            if not address:
+                return False, f"建邮响应缺少 address: {str(data)[:150]}"
+            if jwt:
+                try:
+                    requests.delete(f"{base}/api/delete_address",
+                                    headers={"x-custom-auth": admin, "x-admin-auth": admin,
+                                             "Authorization": f"Bearer {jwt}"},
+                                    timeout=15)
+                except Exception:
+                    pass
+            return True, "建邮成功，测试邮箱已清理"
+        except Exception as exc:
+            return False, f"CloudTemp 建邮失败: {str(exc)[:200]}"
+    if provider == "yyds":
+        if not YYDS_KEY:
+            return False, "YYDS Mail 需要先填写 API Key"
+        try:
+            r = requests.get(f"{YYDS_BASE}/domains", headers={"X-API-Key": YYDS_KEY}, timeout=15)
+            if r.status_code == 200:
+                return True, "YYDS 连接正常"
+            return False, f"YYDS 接口返回 {r.status_code}"
+        except Exception as exc:
+            return False, f"YYDS 连接失败: {str(exc)[:200]}"
+    if provider in {"yunxin", "qingyi", "custom"}:
+        if not MAIL_API_BASE:
+            return False, "云芯邮箱需要先填写 API 地址"
+        try:
+            headers = {"Content-Type": "application/json"}
+            if MAIL_API_KEY:
+                headers["X-API-Key"] = MAIL_API_KEY
+            r = requests.get(f"{MAIL_API_BASE}/api/v1/mails", headers=headers,
+                             params={"limit": 1}, timeout=15)
+            if r.status_code == 200:
+                return True, "云芯接口连接正常"
+            return False, f"云芯接口返回 {r.status_code}"
+        except Exception as exc:
+            return False, f"云芯连接失败: {str(exc)[:200]}"
+    return False, f"未知邮箱服务: {provider}"
 
 
 # ── 启动引导 ────────────────────────────────────────────

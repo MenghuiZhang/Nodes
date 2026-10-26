@@ -30,7 +30,7 @@ const settingFields = {
     'proxy_arp_check_enabled', 'proxy_arp_probe_url', 'arp_publish_url', 'arp_publish_token',
   ],
   registration: ['proxy_enabled', 'http_proxy', 'https_proxy', 'no_proxy'],
-  mail: ['mail_provider', 'mail_type', 'mail_suffix', 'mail_domain', 'mail_api_base', 'mail_api_key', 'yyds_api_key', 'yyds_domain'],
+  mail: ['mail_provider', 'mail_type', 'mail_suffix', 'mail_domain', 'mail_api_base', 'mail_api_key', 'yyds_api_key', 'yyds_domain', 'cf_temp_base', 'cf_temp_admin_key', 'cf_temp_domain'],
   captcha: ['captcha_provider', 'captcha_timeout', 'captcha_poll_interval', 'captcha_api_base', 'captcha_api_key'],
   exports: ['export_quality_profile'],
 };
@@ -41,6 +41,81 @@ const captchaApiDefaults = {
   capmonster: 'https://api.capmonster.cloud',
   browser: '',
 };
+
+// ── 邮箱服务：三卡片 + 域名池 ────────────────────────────
+const mailProviders = [
+  { id: 'yunxin', name: '云芯 Yunxin', desc: '自建邮箱 API · 类型/后缀' },
+  { id: 'yyds', name: 'YYDS Mail', desc: 'maliapi.215.im/v1 · 域名可选' },
+  { id: 'cloudflare_temp', name: 'CloudTemp', desc: 'Cloudflare 临时邮箱 · 域名池轮换' },
+];
+const mailProviderIds = mailProviders.map(item => item.id);
+
+const mailState = {
+  selected: 'yunxin',
+  fetchedDomains: { yyds: [], cloudflare_temp: [] },
+  poolPage: 1,
+  poolQuery: '',
+  poolStatus: '',
+  poolSelection: new Set(),
+  importedDomains: [],
+};
+
+function selectedMailProvider() {
+  const value = document.getElementById('mail_provider')?.value;
+  return mailProviderIds.includes(value) ? value : 'yunxin';
+}
+
+function renderMailProviderCards() {
+  const container = document.getElementById('mailProviderCards');
+  if (!container) return;
+  const active = selectedMailProvider();
+  container.innerHTML = mailProviders.map(item => `
+    <button type="button" class="provider-card${item.id === mailState.selected ? ' selected' : ''}${item.id === active ? ' active' : ''}" data-mail-provider="${item.id}">
+      <h3>${escapeHtml(item.name)}</h3>
+      <p>${escapeHtml(item.desc)}</p>
+    </button>`).join('');
+  container.querySelectorAll('[data-mail-provider]').forEach(card => {
+    card.addEventListener('click', () => selectMailProvider(card.dataset.mailProvider));
+  });
+  document.getElementById('mailActiveBadge').textContent =
+    `当前：${mailProviders.find(item => item.id === active)?.name || active}`;
+}
+
+function selectMailProvider(providerId) {
+  mailState.selected = mailProviderIds.includes(providerId) ? providerId : 'yunxin';
+  mailProviderIds.forEach(id => {
+    const form = document.getElementById(`form-${id}`);
+    if (form) form.hidden = id !== mailState.selected;
+  });
+  renderMailProviderCards();
+  if (mailState.selected === 'cloudflare_temp') loadDomainPool();
+}
+
+function renderFetchedDomains() {
+  const yydsList = document.getElementById('yydsDomainList');
+  if (yydsList) {
+    yydsList.innerHTML = mailState.fetchedDomains.yyds
+      .map(d => `<option value="${escapeHtml(d)}">`).join('');
+  }
+  const cfList = document.getElementById('cfTempDomainList');
+  if (cfList) {
+    cfList.innerHTML = mailState.fetchedDomains.cloudflare_temp
+      .map(d => `<option value="${escapeHtml(d)}">`).join('');
+  }
+}
+
+function randomFromList(listId, inputId, pool) {
+  const input = document.getElementById(inputId);
+  if (!input) return;
+  const options = [...document.querySelectorAll(`#${listId} option`)].map(o => o.value);
+  const source = options.length ? options : (pool || []);
+  if (!source.length) {
+    toast('请先「拉取域名」或往域名池添加域名', true);
+    return;
+  }
+  input.value = source[Math.floor(Math.random() * source.length)];
+}
+
 
 function applyCaptchaProviderDefault(force = false) {
   const provider = document.getElementById('captcha_provider');
@@ -591,6 +666,10 @@ function fillSettings(settings) {
   }
   renderQualityMeta(settings);
   applyCaptchaProviderDefault(false);
+  if (document.getElementById('mailProviderCards')) {
+    selectMailProvider(selectedMailProvider());
+    renderFetchedDomains();
+  }
 }
 
 async function loadSettings(group) {
@@ -862,6 +941,278 @@ document.getElementById('registrationSettingsForm').addEventListener('submit', e
 document.getElementById('mailSettingsForm').addEventListener('submit', event => {
   saveSettingsGroup(event, 'registration', settingFields.mail, '邮箱设置已同步');
 });
+
+// ── 邮箱服务事件绑定 ─────────────────────────────────────
+document.getElementById('mailActivateButton')?.addEventListener('click', async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const data = await api('/api/mail/activate', {
+      method: 'POST',
+      body: JSON.stringify({ provider: selectedMailProvider() }),
+    });
+    document.getElementById('mail_provider').value = data.provider;
+    renderMailProviderCards();
+    toast(data.message);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+document.getElementById('mailFetchDomainsButton')?.addEventListener('click', async event => {
+  const button = event.currentTarget;
+  const provider = selectedMailProvider();
+  button.disabled = true;
+  try {
+    const data = await api(`/api/mail/domains?provider=${encodeURIComponent(provider)}`);
+    const domains = (data.domains || []).map(x => String(x).trim().toLowerCase()).filter(Boolean);
+    mailState.fetchedDomains[provider] = domains;
+    renderFetchedDomains();
+    if (provider === 'cloudflare_temp') {
+      mailState.importedDomains = domains;
+      toast(`${data.message || '拉取完成'}，可点「导入拉取的域名」写入域名池`);
+    } else {
+      toast(data.message || `已拉取 ${domains.length} 个域名`);
+    }
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+document.getElementById('mailTestButton')?.addEventListener('click', async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const data = await api('/api/mail/test', {
+      method: 'POST',
+      body: JSON.stringify({ provider: selectedMailProvider() }),
+    });
+    toast(data.message, !data.ok);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+document.getElementById('yydsRandomDomain')?.addEventListener('click', () => {
+  randomFromList('yydsDomainList', 'yyds_domain', mailState.fetchedDomains.yyds);
+});
+document.getElementById('cfTempRandomDomain')?.addEventListener('click', () => {
+  randomFromList('cfTempDomainList', 'cf_temp_domain', mailState.importedDomains);
+});
+
+// ── CloudTemp 域名池 ─────────────────────────────────────
+async function loadDomainPool() {
+  const body = document.getElementById('domainPoolBody');
+  if (!body) return;
+  try {
+    const params = new URLSearchParams({
+      page: String(mailState.poolPage),
+      per_page: '50',
+      q: mailState.poolQuery,
+      status: mailState.poolStatus,
+    });
+    const data = await api(`/api/mail/pool?${params}`);
+    renderDomainPool(data);
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function domainHealthBadge(item) {
+  const cooling = Number(item.cooldown_until || 0) > Date.now() / 1000;
+  if (cooling) return '<span class="pool-badge cooling">冷却中</span>';
+  const health = item.email_health || 'untested';
+  const label = { healthy: '健康', unhealthy: '异常', untested: '未测试' }[health] || health;
+  return `<span class="pool-badge ${escapeHtml(health)}">${escapeHtml(label)}</span>`;
+}
+
+function renderDomainPool(data) {
+  const body = document.getElementById('domainPoolBody');
+  if (!body) return;
+  const items = data.items || [];
+  const summary = data.summary || {};
+  document.getElementById('domainPoolSummary').textContent =
+    `共 ${summary.total ?? 0} · 启用 ${summary.enabled ?? 0} · 停用 ${summary.disabled ?? 0}`;
+  const totalPages = Math.max(1, Math.ceil((data.total || 0) / (data.per_page || 50)));
+  document.getElementById('domainPoolPage').textContent = `${data.page || 1} / ${totalPages}`;
+  mailState.poolSelection = new Set(
+    items.filter(item => mailState.poolSelection.has(item.id)).map(item => item.id),
+  );
+  body.innerHTML = items.length ? items.map(item => `
+    <tr>
+      <td><input type="checkbox" data-pool-check="${escapeHtml(item.id)}" ${mailState.poolSelection.has(item.id) ? 'checked' : ''}></td>
+      <td class="domain-name" title="${escapeHtml(item.domain)}">${escapeHtml(item.domain)}</td>
+      <td><span class="pool-badge ${escapeHtml(item.status)}">${item.status === 'enabled' ? '启用' : '停用'}</span></td>
+      <td>${domainHealthBadge(item)}</td>
+      <td>${item.success_count ?? 0}</td>
+      <td>${item.failure_count ?? 0}</td>
+      <td class="domain-muted" title="${escapeHtml(item.last_failure_message || '')}">
+        ${escapeHtml(item.last_failure_message ? `${item.last_failure_message} (${formatDate(item.last_failure_at)})` : '—')}
+      </td>
+      <td>
+        <button type="button" class="secondary-button mini" data-pool-toggle="${escapeHtml(item.id)}" data-enabled="${item.status === 'enabled' ? '0' : '1'}">${item.status === 'enabled' ? '停用' : '启用'}</button>
+        <button type="button" class="secondary-button mini" data-pool-move="${escapeHtml(item.id)}" data-direction="up">↑</button>
+        <button type="button" class="secondary-button mini" data-pool-move="${escapeHtml(item.id)}" data-direction="down">↓</button>
+      </td>
+    </tr>`).join('') : '<tr><td colspan="8" class="empty-cell">域名池为空，可手动添加或「拉取域名」后导入</td></tr>';
+  body.querySelectorAll('[data-pool-check]').forEach(box => {
+    box.addEventListener('change', () => {
+      if (box.checked) mailState.poolSelection.add(box.dataset.poolCheck);
+      else mailState.poolSelection.delete(box.dataset.poolCheck);
+      syncPoolCheckAll();
+    });
+  });
+  body.querySelectorAll('[data-pool-toggle]').forEach(button => {
+    button.addEventListener('click', async () => {
+      try {
+        await api(`/api/mail/pool/${encodeURIComponent(button.dataset.poolToggle)}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ enabled: button.dataset.enabled === '1' }),
+        });
+        loadDomainPool();
+      } catch (error) {
+        toast(error.message, true);
+      }
+    });
+  });
+  body.querySelectorAll('[data-pool-move]').forEach(button => {
+    button.addEventListener('click', async () => {
+      try {
+        await api('/api/mail/pool/move', {
+          method: 'POST',
+          body: JSON.stringify({ id: button.dataset.poolMove, direction: button.dataset.direction }),
+        });
+        loadDomainPool();
+      } catch (error) {
+        toast(error.message, true);
+      }
+    });
+  });
+  syncPoolCheckAll();
+}
+
+function syncPoolCheckAll() {
+  const checkAll = document.getElementById('domainPoolCheckAll');
+  if (checkAll) checkAll.checked = mailState.poolSelection.size > 0;
+}
+
+function selectedPoolIds() {
+  return [...mailState.poolSelection];
+}
+
+document.getElementById('domainPoolCheckAll')?.addEventListener('change', event => {
+  const checked = event.target.checked;
+  document.querySelectorAll('[data-pool-check]').forEach(box => {
+    box.checked = checked;
+    if (checked) mailState.poolSelection.add(box.dataset.poolCheck);
+    else mailState.poolSelection.delete(box.dataset.poolCheck);
+  });
+});
+
+document.getElementById('domainPoolRefresh')?.addEventListener('click', () => {
+  mailState.poolPage = 1;
+  loadDomainPool();
+});
+document.getElementById('domainPoolPrev')?.addEventListener('click', () => {
+  if (mailState.poolPage > 1) { mailState.poolPage -= 1; loadDomainPool(); }
+});
+document.getElementById('domainPoolNext')?.addEventListener('click', () => {
+  mailState.poolPage += 1;
+  loadDomainPool();
+});
+document.getElementById('domainPoolQuery')?.addEventListener('input', event => {
+  mailState.poolQuery = event.target.value.trim();
+  mailState.poolPage = 1;
+  clearTimeout(window.__poolSearchTimer);
+  window.__poolSearchTimer = setTimeout(loadDomainPool, 300);
+});
+document.getElementById('domainPoolStatus')?.addEventListener('change', event => {
+  mailState.poolStatus = event.target.value;
+  mailState.poolPage = 1;
+  loadDomainPool();
+});
+
+document.getElementById('domainPoolAdd')?.addEventListener('click', async () => {
+  const input = document.getElementById('domainPoolNew');
+  const value = input.value.trim();
+  if (!value) { toast('请输入域名', true); return; }
+  try {
+    const data = await api('/api/mail/pool', {
+      method: 'POST',
+      body: JSON.stringify({ domains: value.split(/[\s,]+/).filter(Boolean) }),
+    });
+    input.value = '';
+    toast(data.message);
+    loadDomainPool();
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
+
+document.getElementById('domainPoolImport')?.addEventListener('click', async () => {
+  if (!mailState.importedDomains.length) {
+    toast('请先点「拉取域名」获取 CloudTemp 可用域名', true);
+    return;
+  }
+  try {
+    const data = await api('/api/mail/pool', {
+      method: 'POST',
+      body: JSON.stringify({ domains: mailState.importedDomains, replace: true }),
+    });
+    toast(data.message);
+    loadDomainPool();
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
+
+async function poolBulk(action) {
+  const ids = selectedPoolIds();
+  if (!ids.length) { toast('请先勾选域名', true); return; }
+  if (action === 'delete' && !confirm(`确定永久删除选中的 ${ids.length} 个域名及其历史？`)) return;
+  try {
+    const data = await api('/api/mail/pool/bulk', {
+      method: 'POST',
+      body: JSON.stringify({ ids, action }),
+    });
+    toast(data.message || `已处理 ${data.changed ?? 0} 个域名`);
+    mailState.poolSelection.clear();
+    loadDomainPool();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+document.getElementById('domainPoolEnable')?.addEventListener('click', () => poolBulk('enable'));
+document.getElementById('domainPoolDisable')?.addEventListener('click', () => poolBulk('disable'));
+document.getElementById('domainPoolDelete')?.addEventListener('click', () => poolBulk('delete'));
+
+document.getElementById('domainPoolTest')?.addEventListener('click', async event => {
+  const ids = selectedPoolIds();
+  if (!ids.length) { toast('请先勾选要测试的域名', true); return; }
+  const button = event.currentTarget;
+  button.disabled = true;
+  toast(`正在测试 ${ids.length} 个域名（真实建邮）…`);
+  try {
+    const data = await api('/api/mail/pool/test', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    });
+    toast(`测试完成：通过 ${data.passed}/${data.total}${data.all_passed ? '，全部健康' : ''}`, !data.all_passed);
+    loadDomainPool();
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+});
+
 document.getElementById('captchaSettingsForm').addEventListener('submit', event => {
   saveSettingsGroup(event, 'registration', settingFields.captcha, '打码设置已同步');
 });
