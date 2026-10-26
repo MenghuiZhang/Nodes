@@ -1,0 +1,32 @@
+# 版本控制与本地环境
+.git
+.gitignore
+.venv
+venv
+**/__pycache__
+*.pyc
+.DS_Store
+.dockerignore
+
+# 运行数据与凭据（挂载卷 / 本地配置，不进镜像）
+account
+node
+web-data
+data
+logs
+*.log
+config.local.json
+proxyscrape_token.json
+*.token.json
+certs
+*.pem
+*.key
+
+# 文档与图片（不影响运行）
+docs
+*.md
+!README.md
+
+# 本地临时产物
+/Dockerfile.debug
+node_modules

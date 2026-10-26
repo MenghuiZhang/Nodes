@@ -1,6 +1,7 @@
 services:
   nodes:
-    image: nodes:20260918-yunxin4-dashboard
+    # CI 构建的镜像：ghcr.io/<owner>/nodes:latest（本地构建可改回 nodes:local）
+    image: ghcr.io/menghuizhang/nodes:latest
     build:
       context: .
     stdin_open: true
@@ -13,7 +14,7 @@ services:
     restart: "no"
 
   dashboard:
-    image: nodes:20260918-yunxin4-dashboard
+    image: ghcr.io/menghuizhang/nodes:latest
     entrypoint:
       - gunicorn
     command:

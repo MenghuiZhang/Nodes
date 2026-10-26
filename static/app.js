@@ -359,7 +359,7 @@ async function refreshDashboard() {
     const active = Boolean(data.active_task);
     const activity = document.getElementById('activity');
     activity.classList.toggle('running', active);
-    activity.querySelector('span:last-child').textContent = active ? `任务 ${data.active_task} 运行中` : '无活动任务';
+    activity.querySelector('span:last-child').textContent = active ? `RUNNING · ${data.active_task}` : 'IDLE · 无活动任务';
     const startButton = document.getElementById('startButton');
     if (startButton) {
       startButton.disabled = active;
@@ -842,8 +842,8 @@ document.getElementById('importForm').addEventListener('submit', async event => 
   }
 });
 document.getElementById('menuButton').addEventListener('click', () => {
-  document.getElementById('sidebar').classList.add('open');
-  document.getElementById('sidebarScrim').classList.add('show');
+  document.getElementById('sidebar').classList.toggle('open');
+  document.getElementById('sidebarScrim').classList.toggle('show');
 });
 document.getElementById('sidebarScrim').addEventListener('click', () => {
   document.getElementById('sidebar').classList.remove('open');

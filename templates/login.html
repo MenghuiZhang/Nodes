@@ -3,24 +3,61 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Nodes Ops 登录</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <title>Nodes Ops · 登录工作台</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}?v=paper1">
 </head>
 <body class="login-page">
-  <main class="login-shell">
+  <main class="login-shell panel">
     <section class="login-brand">
-      <div class="brand-mark large">N</div>
-      <h1>Nodes Ops</h1>
-      <p>注册任务运营控制台</p>
-      <div class="login-status"><span></span>Turnstile · Mail · Premium DC</div>
+      <div class="login-brand-top">
+        <div class="brand-mark large">N</div>
+        <div class="login-title-row">
+          <h1>Nodes Ops</h1>
+          <span class="console-pill">CONSOLE</span>
+        </div>
+        <p>代理 IP 质检流水线 · 出口订阅 · 账号池供给工作台</p>
+      </div>
+      <div class="login-feature-list">
+        <div class="login-feature-item">
+          <span class="feature-dot ok"></span>
+          <span>上游拉取 / 本地短路 → 质检门禁 → 合格代理导出</span>
+        </div>
+        <div class="login-feature-item">
+          <span class="feature-dot brand"></span>
+          <span>ARP 路径探测 · 延迟与国家过滤 · 多 Profile 切换</span>
+        </div>
+        <div class="login-feature-item">
+          <span class="feature-dot sun"></span>
+          <span>Turnstile · 临时邮箱 · 账号池容量巡检与自动补号</span>
+        </div>
+      </div>
+      <div class="login-status">
+        <span></span>Turnstile · Mail · Quality Gate · Premium DC
+      </div>
     </section>
     <section class="login-form-panel">
       <form method="post" class="login-form">
-        <div><span class="eyebrow">安全访问</span><h2>登录控制台</h2></div>
+        <div class="login-form-head">
+          <span class="eyebrow">SECURITY ACCESS</span>
+          <h2>登录工作台</h2>
+          <p class="login-sub">请输入管理员凭据以访问代理运营控制台</p>
+        </div>
         {% if error %}<p class="login-error">{{ error }}</p>{% endif %}
-        <label><span>用户名</span><input name="username" value="{{ username }}" autocomplete="username" required autofocus></label>
-        <label><span>密码</span><input name="password" type="password" autocomplete="current-password" required></label>
-        <button class="primary-button" type="submit">登录</button>
+        <label>
+          <span>用户名</span>
+          <input name="username" value="{{ username }}" placeholder="输入管理员账号" autocomplete="username" required autofocus>
+        </label>
+        <label>
+          <span>密码</span>
+          <input name="password" type="password" placeholder="输入访问密码" autocomplete="current-password" required>
+        </label>
+        <button class="primary-button login-submit" type="submit">
+          <span>进入控制台</span>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+        </button>
       </form>
     </section>
   </main>

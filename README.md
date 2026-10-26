@@ -232,6 +232,23 @@ git grep -n -I -E "(api[_-]?key|access[_-]?token|refresh[_-]?token|password|prox
 
 ## 更新部署
 
+### CI 镜像（推荐）
+
+push 到 main 或打 `v*` tag 时，GitHub Actions 自动构建双架构镜像并推送 GHCR（amd64 在 x64 原生 runner、arm64 在 ARM 原生 runner 并行构建，不走 QEMU）。服务器直接拉取：
+
+```bash
+cp config.local.json config.local.json.backup
+docker compose down
+git pull --ff-only
+docker compose pull dashboard
+docker compose up -d dashboard dashboard-proxy
+```
+
+Camoufox 浏览器已烘进镜像，运行时不再下载。如 GitHub Releases 直连慢，可在仓库
+Settings → Variables 配 `CAMOUFOX_ZIP_URL` / `CAMOUFOX_MODEL_URL` 走反代。
+
+### 本地构建
+
 ```bash
 cp config.local.json config.local.json.backup
 docker compose down
