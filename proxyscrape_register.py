@@ -64,6 +64,7 @@ MAIL_DOMAIN = str(_setting("mail_domain", "MAIL_DOMAIN")).strip()
 YYDS_BASE = "https://maliapi.215.im/v1"
 YYDS_KEY = str(_setting("yyds_api_key", "YYDS_API_KEY")).strip()
 YYDS_DOMAIN = str(_setting("yyds_domain", "YYDS_DOMAIN")).strip()
+_CF_LAST_JWT = ""
 
 # Turnstile solver. When a 2Captcha key is configured, use its API by default;
 # otherwise keep the local Camoufox solver for backward compatibility.
@@ -338,6 +339,86 @@ def yyds_wait_code(address, timeout=180, interval=5):
     raise TimeoutError("等验证码超时")
 
 
+# ── Cloudflare Temp Email（自建Worker，管理员API）────────
+def _cf_temp_config():
+    base = str(_setting("cf_temp_base", "CF_TEMP_BASE", "")).strip().rstrip("/")
+    admin = str(_setting("cf_temp_admin_key", "CF_TEMP_ADMIN_KEY", "")).strip()
+    if not base or not admin:
+        raise RuntimeError("未配置 cf_temp_base / cf_temp_admin_key")
+    return base, admin
+
+
+def cf_temp_create_mailbox():
+    """管理员 API 建邮：POST /admin/new_address。返回 (address, jwt)。"""
+    global _CF_LAST_JWT
+    base, admin = _cf_temp_config()
+    domain = str(_setting("cf_temp_domain", "CF_TEMP_DOMAIN", "")).strip()
+
+    def _do():
+        payload = {"name": random_mailbox_local()}
+        if domain and domain.lower() != "auto":
+            payload["domain"] = domain
+        r = requests.post(f"{base}/admin/new_address",
+                          headers={"x-admin-auth": admin, "Content-Type": "application/json"},
+                          json=payload, timeout=20)
+        r.raise_for_status()
+        return r.json()
+    d = _retry(_do, tries=3, what="建邮箱(cf_temp)")
+    email = d.get("address") or d.get("email")
+    jwt = d.get("jwt") or d.get("token") or email
+    if not email or not jwt:
+        raise RuntimeError(f"cf_temp 建邮响应缺 address/jwt: {str(d)[:150]}")
+    _CF_LAST_JWT = jwt
+    log(f"临时邮箱: {email}")
+    return email, jwt
+
+
+def cf_temp_wait_code(address, jwt=None, timeout=180, interval=5):
+    """轮询 /api/mails（JWT 鉴权），从正文抽 ProxyScrape 验证码（10 位字母数字）。"""
+    jwt = jwt or _CF_LAST_JWT
+    if not jwt:
+        raise RuntimeError("cf_temp 缺少邮箱 JWT（先建邮）")
+    base, admin = _cf_temp_config()
+    deadline = time.time() + timeout
+    seen = set()
+    while time.time() < deadline:
+        try:
+            r = requests.get(f"{base}/api/mails", params={"limit": 20, "offset": 0},
+                             headers={"x-custom-auth": admin, "Authorization": f"Bearer {jwt}"},
+                             timeout=15)
+            mails = r.json() if r.status_code == 200 else {}
+            mails = mails.get("results") if isinstance(mails, dict) else mails
+            for m in mails or []:
+                mail_id = str(m.get("id") or m.get("mail_id") or "")
+                if mail_id and mail_id in seen:
+                    continue
+                seen.add(mail_id)
+                # 列表字段可能直接带正文/预览
+                blobs = [str(m.get(k) or "") for k in ("text", "preview", "subject", "html")]
+                # 拉详情拿全文
+                try:
+                    d = requests.get(f"{base}/api/mail/{mail_id}",
+                                     headers={"x-custom-auth": admin, "Authorization": f"Bearer {jwt}"},
+                                     timeout=15).json()
+                    d = d.get("result") or d.get("data") or d
+                    if isinstance(d, dict):
+                        blobs.extend(str(d.get(k) or "") for k in ("text", "html", "message", "raw"))
+                        if isinstance(d.get("html"), list):
+                            blobs.extend(str(x) for x in d["html"])
+                except Exception:
+                    pass
+                blob = _html.unescape(" ".join(blobs))
+                blob = re.sub(r"<[^>]+>", " ", blob)
+                mo = re.search(r"verification code:\s*([A-Za-z0-9]{6,})", blob, re.I)
+                if mo:
+                    log(f"收到验证码: {mo.group(1)}  (主题: {m.get('subject')})")
+                    return mo.group(1)
+        except Exception as e:
+            log(f"[!] cf_temp 收件轮询异常: {str(e)[:80]}")
+        time.sleep(interval)
+    raise TimeoutError("等验证码超时")
+
+
 # ── 云芯邮箱 HTTPS API ──────────────────────────────────
 def _yunxin_headers():
     if not MAIL_API_KEY:
@@ -409,6 +490,8 @@ def yunxin_wait_code(address, timeout=180, interval=5):
 def create_mailbox():
     if MAIL_PROVIDER == "yyds":
         return yyds_create_mailbox()
+    if MAIL_PROVIDER == "cloudflare_temp":
+        return cf_temp_create_mailbox()
     if MAIL_PROVIDER in {"yunxin", "qingyi", "custom"}:
         return yunxin_create_mailbox()
     raise RuntimeError(f"不支持的邮箱服务: {MAIL_PROVIDER}")
@@ -417,6 +500,8 @@ def create_mailbox():
 def wait_mail_code(address, timeout=180, interval=5):
     if MAIL_PROVIDER == "yyds":
         return yyds_wait_code(address, timeout=timeout, interval=interval)
+    if MAIL_PROVIDER == "cloudflare_temp":
+        return cf_temp_wait_code(address, getattr(_tls, "cf_jwt", ""), timeout=timeout, interval=interval)
     if MAIL_PROVIDER in {"yunxin", "qingyi", "custom"}:
         return yunxin_wait_code(address, timeout=timeout, interval=interval)
     raise RuntimeError(f"不支持的邮箱服务: {MAIL_PROVIDER}")
