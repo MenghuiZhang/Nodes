@@ -79,6 +79,47 @@ def pool_settings(config):
     }
 
 
+def public_from_settings(settings):
+    """Map normalized pool settings onto the dashboard/API key names."""
+    data = settings if isinstance(settings, dict) else {}
+    return {
+        "pool_auto_register": bool(data.get("auto_register")),
+        "pool_target_slots": int(data.get("target_slots") or DEFAULT_TARGET_SLOTS),
+        "pool_slots_per_account": int(data.get("slots_per_account") or DEFAULT_SLOTS_PER_ACCOUNT),
+        "pool_max_register_per_round": int(data.get("max_register_per_round") or DEFAULT_MAX_REGISTER),
+        "pool_loop_seconds": int(data.get("loop_seconds") or DEFAULT_LOOP_SECONDS),
+        "pool_min_bandwidth": int(data.get("min_bandwidth") or 0),
+    }
+
+
+def pool_public_settings(config=None):
+    """Capacity/auto-register settings exposed to the dashboard."""
+    return public_from_settings(pool_settings(config))
+
+
+def normalize_pool_setting(key, value):
+    """Clamp one submitted pool setting; raises ValueError on bad input."""
+    if key == "pool_auto_register":
+        return _as_bool(value)
+    ranges = {
+        "pool_target_slots": (1, 800),
+        "pool_slots_per_account": (1, 8),
+        "pool_max_register_per_round": (1, 5),
+        "pool_loop_seconds": (30, 3600),
+        "pool_min_bandwidth": (0, 10 ** 12),
+    }
+    if key not in ranges:
+        raise ValueError(f"未知账号池配置项: {key}")
+    minimum, maximum = ranges[key]
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} 必须是整数")
+    if not minimum <= number <= maximum:
+        raise ValueError(f"{key} 必须在 {minimum} - {maximum} 之间")
+    return number
+
+
 def harvest_ips_by_username(node_dir):
     mapping = {}
     root = Path(node_dir)

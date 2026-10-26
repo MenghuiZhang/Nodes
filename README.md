@@ -154,6 +154,19 @@ Camoufox 打开真实 sign-up 页通过 Cloudflare Turnstile（指纹伪装原�
 | `proxy_quality_workers` | 并行检测数 |
 | `proxy_quality_cache_ttl_sec` | 检测结果缓存时间 |
 
+### 账号池容量与自动补号
+
+| 字段 | 用途 |
+|---|---|
+| `pool_auto_register` | 自动补号总开关（控制台「容量与账号池」和「设置 → 容量与补号」都可切换） |
+| `pool_target_slots` | 目标有效槽位数，默认 80 |
+| `pool_slots_per_account` | 每个账号贡献的槽位，1-8，默认 8 |
+| `pool_max_register_per_round` | 每轮巡检最多注册账号数，1-5 |
+| `pool_loop_seconds` | 巡检间隔秒，30-3600，默认 120 |
+| `pool_min_bandwidth` | 账号最低剩余流量，默认 100MB |
+
+目标槽位低于每号槽位时会自动抬到每号槽位，避免无限补号。关闭 `pool_auto_register` 后巡检仍会统计缺口，但不会启动注册任务。
+
 ## 使用 Web 控制台
 
 登录后可以：

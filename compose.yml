@@ -28,7 +28,8 @@ services:
       - ./data/account:/app/account
       - ./data/node:/app/node
       - ./data/web:/app/web-data
-      - ./config.local.json:/app/config.local.json:ro
+      # 必须可写：控制台保存设置会原子重写 config.local.json，:ro 会导致保存失败。
+      - ./config.local.json:/app/config.local.json
     restart: unless-stopped
 
   dashboard-proxy:

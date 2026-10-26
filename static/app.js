@@ -15,7 +15,7 @@ const titles = {
   quality: ['质检规则', 'ARP / 延迟 / 国家 · dry-run 试跑'],
   exports: ['出口订阅', '质检推荐 · 8892 兼容 · 账号池出口'],
   accounts: ['账号', '账号池供给 · 注册补号与任务'],
-  settings: ['设置', '注册出网 · 邮箱 · 打码'],
+  settings: ['设置', '注册出网 · 邮箱 · 打码 · 容量补号'],
 };
 
 const settingFields = {
@@ -32,6 +32,10 @@ const settingFields = {
   registration: ['proxy_enabled', 'http_proxy', 'https_proxy', 'no_proxy'],
   captcha: ['captcha_provider', 'captcha_timeout', 'captcha_poll_interval', 'captcha_api_base', 'captcha_api_key'],
   exports: ['export_quality_profile'],
+  pool: [
+    'pool_target_slots', 'pool_slots_per_account', 'pool_max_register_per_round',
+    'pool_loop_seconds', 'pool_min_bandwidth',
+  ],
 };
 
 const captchaApiDefaults = {
@@ -240,8 +244,7 @@ function showView(view, options = {}) {
     showSettingsTab(options.tab || state.settingsTab || 'registration');
     loadSettings();
   }
-  if (view === 'sources' || view === 'quality') loadSettings(view === 'sources' ? 'sources' : 'quality');
-  if (view === 'quality') loadQualityAudit();
+  if (view === 'sources' || view === 'quality') loadSettings(view === 'sources' ? 'sources' : 'quality');  if (view === 'quality') loadQualityAudit();
   if (view === 'exports') {
     loadExports();
     loadSettings('exports');
@@ -252,13 +255,14 @@ function renderPool(pool) {
   if (!pool) return;
   const live = pool.live_slots || 0;
   const accounts = pool.live_accounts || 0;
-  const slots = `${live} 可连（${accounts}×8）`;
+  const perAccount = pool.slots_per_account || 8;
+  const slots = `${live} 可连（${accounts}×${perAccount}）`;
   const setText = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
   const setVal = (id, value) => { const el = document.getElementById(id); if (el) el.value = value ?? ''; };
-  setText('poolAccounts', accounts || '—');
+  setText('poolAccounts', accounts);
   setText('poolSlots', slots);
   setText('poolNeeded', pool.needed_accounts ?? 0);
-  setText('poolAuto', pool.auto_register ? '开' : '关');
+  syncAutoRegister(pool.auto_register);
   setVal('poolResinUrl', pool.subscription_url || '');
   setVal('poolGptUrl', pool.gpt_subscription_url || '');
   setVal('poolClashUrl', pool.clash_subscription_url || '');
@@ -270,6 +274,28 @@ function renderPool(pool) {
   setText('metricSlots', `${live}/${pool.needed_accounts ?? 0}`);
   setText('metricSlotsNote', slots);
   setText('invSlots', slots);
+}
+
+// 仪表盘开关与「设置 → 容量与补号」共用同一个后端字段，两处状态保持一致。
+function syncAutoRegister(enabled) {
+  const on = Boolean(enabled);
+  const dash = document.getElementById('pool_auto_register');
+  if (dash) dash.checked = on;
+  const settingsBox = document.getElementById('pool_auto_register_setting');
+  if (settingsBox) settingsBox.checked = on;
+  const label = document.getElementById('poolAuto');
+  if (label) label.textContent = on ? '开' : '关';
+}
+
+async function patchPoolSettings(payload, successText) {
+  const data = await api('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ group: 'pool', ...payload }),
+  });
+  fillSettings(data.settings);
+  syncAutoRegister(data.settings?.pool_auto_register);
+  toast(successText);
+  refreshDashboard();
 }
 
 function renderInventory(inventory, history) {
@@ -683,6 +709,9 @@ function fillSettings(settings) {
   if (exportSelect && settings?.export_quality_profile) {
     exportSelect.value = settings.export_quality_profile;
   }
+  if (settings && 'pool_auto_register' in settings) {
+    syncAutoRegister(settings.pool_auto_register);
+  }
   renderQualityMeta(settings);
   applyCaptchaProviderDefault(false);
   if (document.getElementById('mailProviderCards')) {
@@ -963,6 +992,41 @@ document.getElementById('qualitySettingsForm').addEventListener('submit', event 
 });
 document.getElementById('registrationSettingsForm').addEventListener('submit', event => {
   saveSettingsGroup(event, 'registration', settingFields.registration, '注册出网已保存');
+});
+document.getElementById('poolSettingsForm')?.addEventListener('submit', async event => {
+  event.preventDefault();
+  const button = event.target.querySelector('button[type="submit"]');
+  if (button) button.disabled = true;
+  try {
+    await patchPoolSettings({
+      ...collectSettings(settingFields.pool),
+      pool_auto_register: Boolean(document.getElementById('pool_auto_register_setting')?.checked),
+    }, '容量设置已保存');
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    if (button) button.disabled = false;
+  }
+});
+
+async function toggleAutoRegister(enabled, previous) {
+  syncAutoRegister(enabled);
+  try {
+    await patchPoolSettings(
+      { pool_auto_register: enabled },
+      enabled ? '自动补号已开启' : '自动补号已关闭',
+    );
+  } catch (error) {
+    syncAutoRegister(previous);
+    toast(error.message, true);
+  }
+}
+
+document.getElementById('pool_auto_register')?.addEventListener('change', event => {
+  toggleAutoRegister(event.target.checked, !event.target.checked);
+});
+document.getElementById('pool_auto_register_setting')?.addEventListener('change', event => {
+  toggleAutoRegister(event.target.checked, !event.target.checked);
 });
 document.getElementById('mailSettingsForm').addEventListener('submit', event => {
   event.preventDefault();

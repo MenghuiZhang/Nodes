@@ -182,7 +182,14 @@
                 <div><span>有效账号</span><strong id="poolAccounts">—</strong></div>
                 <div><span>有效槽位</span><strong id="poolSlots">—</strong></div>
                 <div><span>缺口账号</span><strong id="poolNeeded">—</strong></div>
-                <div><span>自动补号</span><strong id="poolAuto">—</strong></div>
+                <div class="chain-switch-cell">
+                  <span>自动补号</span>
+                  <label class="switch" title="开启后巡检发现槽位不足会自动注册补号">
+                    <input id="pool_auto_register" type="checkbox" role="switch" aria-label="自动补号">
+                    <span class="switch-track" aria-hidden="true"></span>
+                    <strong id="poolAuto">关</strong>
+                  </label>
+                </div>
               </div>
               <div class="panel-body-pad">
                 <div class="callout">
@@ -470,6 +477,7 @@
             <button type="button" class="subtab active" data-settings-tab="registration">注册出网</button>
             <button type="button" class="subtab" data-settings-tab="mail">邮箱服务</button>
             <button type="button" class="subtab" data-settings-tab="captcha">打码接口</button>
+            <button type="button" class="subtab" data-settings-tab="capacity">容量与补号</button>
           </div>
 
           <div class="settings-tab active" id="settings-tab-registration">
@@ -607,6 +615,31 @@
                 <label><span>打码 API Key</span><input id="captcha_api_key" placeholder="CapMonster / YesCaptcha / 2Captcha client key"></label>
                 <div class="settings-actions">
                   <button class="primary-button settings-save" type="submit">保存打码设置</button>
+                </div>
+              </form>
+            </section>
+          </div>
+
+          <div class="settings-tab" id="settings-tab-capacity">
+            <section class="panel page-panel">
+              <div class="panel-heading">
+                <div><h2>容量与补号</h2><p>目标槽位 · 每号槽位 · 巡检节奏 · 自动补号开关</p></div>              </div>
+              <form id="poolSettingsForm" class="settings-form">
+                <label class="check-row"><input id="pool_auto_register_setting" type="checkbox"><span>启用自动补号（巡检发现缺口时自动注册）</span></label>
+                <div class="form-grid">
+                  <label><span>目标槽位</span><input id="pool_target_slots" type="number" min="1" max="800"></label>
+                  <label><span>每号槽位</span><input id="pool_slots_per_account" type="number" min="1" max="8"></label>
+                  <label><span>每轮最多注册</span><input id="pool_max_register_per_round" type="number" min="1" max="5"></label>
+                  <label><span>巡检间隔秒</span><input id="pool_loop_seconds" type="number" min="30" max="3600"></label>
+                  <label><span>最低剩余流量 bytes</span><input id="pool_min_bandwidth" type="number" min="0" step="1048576"></label>
+                </div>
+                <p class="settings-hint">
+                  缺口 = 目标槽位 − 当前合格槽位。每号槽位上限 8；目标槽位小于每号槽位时会自动抬到每号槽位。
+                  最低剩余流量默认 100MB（104857600），低于此值的账号不再计入有效池。
+                </p>
+                <div class="settings-actions">
+                  <button class="primary-button settings-save" type="submit">保存容量设置</button>
+                  <p class="settings-hint">保存后下一轮巡检生效，不会打断正在运行的注册任务。</p>
                 </div>
               </form>
             </section>

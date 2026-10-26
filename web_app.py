@@ -105,6 +105,12 @@ SETTINGS_KEYS = (
     "proxy_quality_cache_ttl_sec",
     "quality_profile_id",
     "export_quality_profile",
+    "pool_auto_register",
+    "pool_target_slots",
+    "pool_slots_per_account",
+    "pool_max_register_per_round",
+    "pool_loop_seconds",
+    "pool_min_bandwidth",
 )
 
 QUALITY_FLAT_KEYS = (
@@ -214,6 +220,14 @@ SETTINGS_GROUPS = {
         "resin_gateway_port",
         "resin_gateway_platform",
     ),
+    "pool": (
+        "pool_auto_register",
+        "pool_target_slots",
+        "pool_slots_per_account",
+        "pool_max_register_per_round",
+        "pool_loop_seconds",
+        "pool_min_bandwidth",
+    ),
 }
 
 
@@ -281,6 +295,7 @@ def _public_settings(config):
         "export_quality_profile": str(
             config.get("export_quality_profile") or config.get("quality_profile_id") or "default"
         ).strip() or "default",
+        **pool.pool_public_settings(config),
     }
 
 
@@ -444,12 +459,13 @@ def _clean_url(value, field):
 
 
 def _apply_settings(payload):
-    if TASK_STORE.active():
+    data = payload if isinstance(payload, dict) else {}
+    group = str(data.get("group") or "").strip().lower()
+    # Capacity switches only affect the next pool tick, so they stay editable while a task runs.
+    if TASK_STORE.active() and group != "pool":
         raise RuntimeError("有注册任务正在运行，请结束后再改配置")
     current = _read_config()
     next_config = dict(current)
-    data = payload if isinstance(payload, dict) else {}
-    group = str(data.get("group") or "").strip().lower()
     if group:
         if group not in SETTINGS_GROUPS:
             raise ValueError(f"未知配置分组: {group}")
@@ -665,7 +681,34 @@ def _apply_settings(payload):
         elif "export_quality_profile" not in next_config:
             next_config["export_quality_profile"] = next_config.get("quality_profile_id") or "default"
 
-    _atomic_json(CONFIG_FILE, next_config)
+    pool_keys = set(SETTINGS_GROUPS["pool"])
+    pool_touched = pool_keys & set(incoming)
+    if pool_touched:
+        changed = {}
+        for key in pool_touched:
+            normalized = pool.normalize_pool_setting(key, incoming[key])
+            next_config[key] = normalized
+            changed[key] = normalized
+        # Keep the target consistent: a target below slots_per_account would loop forever.
+        target = int(next_config.get("pool_target_slots") or pool.DEFAULT_TARGET_SLOTS)
+        per_account = int(next_config.get("pool_slots_per_account") or pool.DEFAULT_SLOTS_PER_ACCOUNT)
+        if target < per_account:
+            next_config["pool_target_slots"] = per_account
+            changed["pool_target_slots"] = per_account
+        platform_store.append_audit(
+            WEB_DATA_DIR,
+            kind="pool",
+            action="update_capacity",
+            detail=changed,
+        )
+
+    try:
+        _atomic_json(CONFIG_FILE, next_config)
+    except OSError as error:
+        raise RuntimeError(
+            f"配置文件不可写（{CONFIG_FILE}）：{error.strerror or error}。"
+            "Docker 部署请去掉 config.local.json 挂载的 :ro，或改用可写目录。"
+        ) from error
     if hasattr(worker, "reload_settings"):
         worker.reload_settings()
     return _public_settings(next_config)
@@ -794,11 +837,27 @@ def _utc_now():
 def _atomic_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+        os.chmod(temporary, 0o600)
+    except OSError:
+        # Read-only parent dir (e.g. bind-mounted config): write the file directly.
+        temporary = None
+    if temporary is not None:
+        try:
+            os.replace(temporary, path)
+            return
+        except OSError:
+            # Docker single-file bind mount: cannot replace the inode (EBUSY/EXDEV).
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+    with path.open("w", encoding="utf-8") as handle:
         json.dump(data, handle, ensure_ascii=False, indent=2)
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
+    os.chmod(path, 0o600)
 
 
 def _safe_error(error):
@@ -1856,6 +1915,7 @@ def _pool_public():
         )
     return {
         **cap,
+        **pool.pool_public_settings(_read_config()),
         "subscription_url": urls["resin_internal"],
         "subscription_url_public": urls["resin_public"],
         "gpt_subscription_url": urls["gpt_public"],

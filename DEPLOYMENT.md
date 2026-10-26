@@ -12,8 +12,14 @@ isolated Xvfb display. Generated accounts, proxy data, and Web task state
 persist under `/opt/nodes/data`.
 
 Before the first registration run, edit `/opt/nodes/config.local.json` and set a
-valid `yyds_api_key`. The file is mode `0600` and mounted read-only in the
-container.
+valid `yyds_api_key`. The file is mode `0600`. Mount it **without** `:ro` in
+`compose.yml`: the dashboard writes settings back to this file (atomic rewrite,
+with an in-place fallback for Docker single-file bind mounts), so a read-only
+mount makes every "保存" action fail.
+
+```yaml
+- ./config.local.json:/app/config.local.json
+```
 
 ## Browser engine (Camoufox)
 

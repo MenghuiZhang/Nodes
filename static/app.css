@@ -1181,6 +1181,101 @@ textarea[readonly] {
   font-variant-numeric: tabular-nums;
 }
 
+/* 自动补号开关（链式 KPI 格内的 switch） */
+.chain-switch-cell .switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.1rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.switch input[type="checkbox"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.switch-track {
+  position: relative;
+  display: inline-block;
+  width: 2.35rem;
+  height: 1.3rem;
+  flex-shrink: 0;
+  border-radius: 999px;
+  border: 1.5px solid var(--line-strong);
+  background: var(--paper-200);
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+
+/* .chain-grid span 会给所有 span 套上标题样式，开关轨道要显式还原 */
+.chain-grid .switch-track {
+  display: inline-block;
+  margin-bottom: 0;
+  color: transparent;
+  font-size: 0;
+  letter-spacing: 0;
+  text-transform: none;
+  border: 1.5px solid var(--line-strong);
+  background: var(--paper-200);
+}
+
+.switch-track::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0.15rem;
+  width: 0.9rem;
+  height: 0.9rem;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(24, 21, 17, 0.25);
+  transform: translateY(-50%);
+  transition: left 0.16s ease;
+}
+
+.switch input[type="checkbox"]:checked + .switch-track {
+  border-color: var(--leaf-500);
+  background: var(--leaf-500);
+}
+
+.switch input[type="checkbox"]:checked + .switch-track::after {
+  left: calc(100% - 1.05rem);
+}
+
+.switch input[type="checkbox"]:focus-visible + .switch-track {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.switch strong {
+  display: inline-block;
+  margin: 0;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.switch input[type="checkbox"]:checked ~ strong {
+  color: var(--ok);
+}
+
 .history-chart {
   display: flex;
   align-items: flex-end;

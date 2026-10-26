@@ -490,6 +490,104 @@ class PoolExportTests(unittest.TestCase):
         self.assertEqual(response.json["task"]["id"], "task-fill")
 
 
+class PoolCapacitySettingsTests(unittest.TestCase):
+    """容量与补号设置：配置落盘 + 开关往返 + 运行中仍可切换。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.config_file = root / "config.local.json"
+        self.config_file.write_text("{}", encoding="utf-8")
+        self.patches = [
+            patch.object(target, "CONFIG_FILE", self.config_file),
+            patch.object(target, "WEB_DATA_DIR", root / "web-data"),
+        ]
+        for item in self.patches:
+            item.start()
+        target.app.config.update(TESTING=True, SESSION_COOKIE_SECURE=False)
+        self.client = target.app.test_client()
+        with self.client.session_transaction() as session:
+            session["authenticated"] = True
+            session["username"] = target.WEB_USERNAME
+            session["csrf_token"] = "test-csrf"
+
+    def tearDown(self):
+        for item in reversed(self.patches):
+            item.stop()
+        self.temp.cleanup()
+
+    def headers(self):
+        return {"X-CSRF-Token": "test-csrf"}
+
+    def saved_config(self):
+        return json.loads(self.config_file.read_text(encoding="utf-8"))
+
+    def test_defaults_are_exposed(self):
+        response = self.client.get("/api/settings")
+        self.assertEqual(response.status_code, 200)
+        settings = response.json["settings"]
+        self.assertIs(settings["pool_auto_register"], True)
+        self.assertEqual(settings["pool_target_slots"], 80)
+        self.assertEqual(settings["pool_slots_per_account"], 8)
+
+    def test_toggle_auto_register_persists_and_reads_back(self):
+        off = self.client.put(
+            "/api/settings", json={"group": "pool", "pool_auto_register": False}, headers=self.headers(),
+        )
+        self.assertEqual(off.status_code, 200)
+        self.assertIs(off.json["settings"]["pool_auto_register"], False)
+        self.assertIs(self.saved_config()["pool_auto_register"], False)
+
+        settings = self.client.get("/api/settings?group=pool").json["settings"]
+        self.assertIs(settings["pool_auto_register"], False)
+
+        on = self.client.put(
+            "/api/settings", json={"group": "pool", "pool_auto_register": True}, headers=self.headers(),
+        )
+        self.assertEqual(on.status_code, 200)
+        self.assertIs(on.json["settings"]["pool_auto_register"], True)
+
+    def test_dashboard_pool_reflects_auto_register(self):
+        self.client.put(
+            "/api/settings", json={"group": "pool", "pool_auto_register": False}, headers=self.headers(),
+        )
+        pool_row = self.client.get("/api/dashboard").json["pool"]
+        self.assertIs(pool_row["auto_register"], False)
+        self.assertEqual(pool_row["target_slots"], 80)
+
+    def test_capacity_fields_validate_and_clamp(self):
+        response = self.client.put(
+            "/api/settings",
+            json={"group": "pool", "pool_slots_per_account": 9},
+            headers=self.headers(),
+        )
+        self.assertEqual(response.status_code, 400)
+
+        response = self.client.put(
+            "/api/settings",
+            json={"group": "pool", "pool_target_slots": 3, "pool_slots_per_account": 8},
+            headers=self.headers(),
+        )
+        self.assertEqual(response.status_code, 200)
+        # 目标槽位不能低于每号槽位，否则巡逻会无限补号。
+        self.assertEqual(response.json["settings"]["pool_target_slots"], 8)
+
+    @patch.object(target.TASK_STORE, "active", return_value={"id": "task-running"})
+    def test_pool_group_is_editable_while_task_runs(self, _active):
+        response = self.client.put(
+            "/api/settings", json={"group": "pool", "pool_auto_register": False}, headers=self.headers(),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIs(response.json["settings"]["pool_auto_register"], False)
+
+    @patch.object(target.TASK_STORE, "active", return_value={"id": "task-running"})
+    def test_other_groups_still_locked_while_task_runs(self, _active):
+        response = self.client.put(
+            "/api/settings", json={"group": "quality", "proxy_max_latency_ms": 2500}, headers=self.headers(),
+        )
+        self.assertEqual(response.status_code, 409)
+
+
 class MailboxLocalTests(unittest.TestCase):
     def test_random_mailbox_local_is_not_serial_ps_prefix(self):
         samples = [target.worker.random_mailbox_local() for _ in range(200)]
