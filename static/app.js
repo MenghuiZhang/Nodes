@@ -59,7 +59,15 @@ const mailState = {
   importedDomains: [],
 };
 
+// 唯一事实源是 mailState.selected（用户点选的卡片）。
+// #mail_provider 隐藏域只在页面初始化时作为默认卡片、激活成功后回写，
+// 任何按钮的操作目标一律取 mailState.selected，绝不读已保存值。
 function selectedMailProvider() {
+  return mailProviderIds.includes(mailState.selected) ? mailState.selected : 'yunxin';
+}
+
+// 当前已激活（后端已保存）的服务：只用于卡片角标/顶栏徽章展示
+function activeMailProvider() {
   const value = document.getElementById('mail_provider')?.value;
   return mailProviderIds.includes(value) ? value : 'yunxin';
 }
@@ -67,9 +75,9 @@ function selectedMailProvider() {
 function renderMailProviderCards() {
   const container = document.getElementById('mailProviderCards');
   if (!container) return;
-  const active = selectedMailProvider();
+  const active = activeMailProvider();
   container.innerHTML = mailProviders.map(item => `
-    <button type="button" class="provider-card${item.id === mailState.selected ? ' selected' : ''}${item.id === active ? ' active' : ''}" data-mail-provider="${item.id}">
+    <button type="button" class="provider-card${item.id === selectedMailProvider() ? ' selected' : ''}${item.id === active ? ' active' : ''}" data-mail-provider="${item.id}">
       <h3>${escapeHtml(item.name)}</h3>
       <p>${escapeHtml(item.desc)}</p>
     </button>`).join('');
@@ -678,7 +686,14 @@ function fillSettings(settings) {
   renderQualityMeta(settings);
   applyCaptchaProviderDefault(false);
   if (document.getElementById('mailProviderCards')) {
-    selectMailProvider(selectedMailProvider());
+    // 只有首次加载用后端已保存的 provider 作为默认选中卡片；
+    // 之后（保存回显等）不踩用户当前点选的卡片。
+    if (!mailState.initialized) {
+      mailState.initialized = true;
+      selectMailProvider(activeMailProvider());
+    } else {
+      renderMailProviderCards();
+    }
     renderFetchedDomains();
   }
 }
@@ -1006,8 +1021,26 @@ document.getElementById('mailFetchDomainsButton')?.addEventListener('click', asy
     mailState.fetchedDomains[provider] = domains;
     renderFetchedDomains();
     if (provider === 'cloudflare_temp') {
+      // 拉取后直接整体导入域名池（对齐 grok-slim-register1：拉取即生效）
       mailState.importedDomains = domains;
-      toast(`${data.message || '拉取完成'}，可点「导入拉取的域名」写入域名池`);
+      if (domains.length) {
+        const imported = await api('/api/mail/pool', {
+          method: 'POST',
+          body: JSON.stringify({ domains, replace: true }),
+        });
+        mailState.poolPage = 1;
+        mailState.poolQuery = '';
+        mailState.poolStatus = '';
+        const queryInput = document.getElementById('domainPoolQuery');
+        const statusSelect = document.getElementById('domainPoolStatus');
+        if (queryInput) queryInput.value = '';
+        if (statusSelect) statusSelect.value = '';
+        await loadDomainPool();
+        renderFetchedDomains();
+        toast(imported.message || data.message || `已导入 ${domains.length} 个域名`);
+      } else {
+        toast(data.message || '接口未返回域名', true);
+      }
     } else {
       toast(data.message || `已拉取 ${domains.length} 个域名`);
     }
@@ -1043,7 +1076,18 @@ document.getElementById('mailTestButton')?.addEventListener('click', async event
 document.getElementById('yydsRandomDomain')?.addEventListener('click', () => {
   randomFromList('yydsDomainList', 'yyds_domain', mailState.fetchedDomains.yyds);
 });
-document.getElementById('cfTempRandomDomain')?.addEventListener('click', () => {
+document.getElementById('cfTempRandomDomain')?.addEventListener('click', async () => {
+  // 优先从域名池启用域名随机取；池空则用最近拉取的列表
+  const input = document.getElementById('cf_temp_domain');
+  if (!input) return;
+  try {
+    const data = await api('/api/mail/pool?status=enabled&per_page=2000');
+    const items = data.items || [];
+    if (items.length) {
+      input.value = items[Math.floor(Math.random() * items.length)].domain;
+      return;
+    }
+  } catch (error) { /* 池不可用时退回 datalist */ }
   randomFromList('cfTempDomainList', 'cf_temp_domain', mailState.importedDomains);
 });
 
