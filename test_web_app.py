@@ -532,6 +532,118 @@ class PoolExportTests(unittest.TestCase):
         self.assertEqual(response.json["task"]["id"], "task-fill")
 
 
+class QualifiedExportForAccountsTests(unittest.TestCase):
+    """按勾选账号导出全量质检代理（不受每账号 8 槽限制）。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.account_dir = root / "account"
+        self.node_dir = root / "node"
+        self.account_dir.mkdir()
+        self.node_dir.mkdir()
+        self.patches = [
+            patch.object(target, "ACCOUNT_DIR", self.account_dir),
+            patch.object(target, "NODE_DIR", self.node_dir),
+            # 关闭质量门：假 IP 无法联网探测，导出用例只关心归属与数量。
+            patch.object(target, "_config_for_quality",
+                         lambda *args, **kwargs: {"proxy_quality_enabled": False}),
+        ]
+        for item in self.patches:
+            item.start()
+        target.app.config.update(TESTING=True, SESSION_COOKIE_SECURE=False)
+        self.client = target.app.test_client()
+        with self.client.session_transaction() as session:
+            session["authenticated"] = True
+            session["username"] = target.WEB_USERNAME
+            session["csrf_token"] = "test-csrf"
+
+    def tearDown(self):
+        for item in reversed(self.patches):
+            item.stop()
+        self.temp.cleanup()
+
+    def post_export(self, emails, **extra):
+        return self.client.post(
+            "/api/accounts/export-qualified-proxies",
+            json={"emails": emails, **extra},
+            headers={"X-CSRF-Token": "test-csrf"},
+        )
+
+    def write_account(self, record):
+        path = self.account_dir / "accounts_test.jsonl"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record) + "\n")
+
+    def live_record(self, email, hosts, **extra):
+        record = {
+            "email": email,
+            "verified": True,
+            "proxy_username": extra.pop("proxy_username", email.split("@")[0]),
+            "proxy_password": "pw",
+            "proxy_ips": hosts,
+            "expiration_time": int(time.time()) + 7 * 86400,
+            "bandwidth_remaining": 9 * 1024 * 1024 * 1024,
+            "ts": 1,
+        }
+        record.update(extra)
+        return record
+
+    def test_requires_selected_emails(self):
+        response = self.post_export([])
+        self.assertEqual(response.status_code, 400)
+
+    def test_returns_all_hosts_not_just_eight_slots(self):
+        hosts = [f"10.1.1.{index}:10000" for index in range(1, 13)]
+        self.write_account(self.live_record("one@example.com", hosts, proxy_username="user-one"))
+        response = self.post_export(["one@example.com"])
+        self.assertEqual(response.status_code, 200)
+        data = response.json
+        self.assertEqual(data["scanned"], 12)
+        self.assertEqual(data["accepted"], 12)
+        lines = [line for line in data["body"].splitlines() if line.strip()]
+        self.assertEqual(len(lines), 12)
+        self.assertTrue(all(line.startswith("http://user-one:pw@") for line in lines))
+
+    def test_harvests_hosts_from_node_files_by_username(self):
+        self.write_account(self.live_record("two@example.com", [], proxy_username="user-two"))
+        (self.node_dir / "proxies_old.txt").write_text(
+            "\n".join(f"http://user-two:pw@11.1.1.{index}:8080" for index in range(1, 11)) + "\n",
+            encoding="utf-8",
+        )
+        response = self.post_export(["two@example.com"])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["scanned"], 10)
+        self.assertTrue(all("user-two:pw@11.1.1." in line for line in response.json["body"].splitlines()))
+
+    def test_dedupes_hosts_across_accounts(self):
+        shared = ["10.9.9.9:10000"]
+        self.write_account(self.live_record("a@example.com", shared, proxy_username="user-a"))
+        self.write_account(self.live_record("b@example.com", shared, proxy_username="user-b"))
+        response = self.post_export(["a@example.com", "b@example.com"])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["scanned"], 1)
+        self.assertEqual(response.json["accepted"], 1)
+        self.assertEqual(response.json["body"].count("10.9.9.9"), 1)
+
+    def test_reports_missing_accounts(self):
+        self.write_account(self.live_record("has@example.com", ["10.1.1.1:10000"], proxy_username="user-has"))
+        response = self.post_export(["has@example.com", "ghost@example.com"])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["missing"], ["ghost@example.com"])
+
+    def test_accepts_socks5_protocol_override(self):
+        self.write_account(self.live_record("s@example.com", ["10.2.2.2:10000"], proxy_username="user-s"))
+        response = self.post_export(["s@example.com"], protocol="socks5")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json["body"].startswith("socks5h://user-s:pw@"))
+
+    def test_requires_login(self):
+        client = target.app.test_client()
+        response = client.post("/api/accounts/export-qualified-proxies", json={"emails": ["x@y.com"]})
+        self.assertEqual(response.status_code, 401)
+
+
 class PoolCapacitySettingsTests(unittest.TestCase):
     """容量与补号设置：配置落盘 + 开关往返 + 运行中仍可切换。"""
 

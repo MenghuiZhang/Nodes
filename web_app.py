@@ -2377,6 +2377,101 @@ def sync_accounts_usage():
     })
 
 
+def _qualified_export_lines(records, protocol="http"):
+    """Quality-check every harvested proxy of the given accounts.
+
+    Unlike the 8-slot live pool this reads all hosts stored in node/*.txt
+    for each account's proxy_username, so nothing is dropped up front.
+    """
+    harvested = pool.harvest_ips_by_username(NODE_DIR)
+    config = _config_for_quality(_read_config())
+    scheme = worker.normalize_proxy_protocol(protocol, default="http")
+    lines = []
+    seen = set()
+    scanned = accepted = rejected = 0
+    reasons = defaultdict(int)
+    per_account = []
+    missing = []
+    for record in records:
+        email = str(record.get("email") or "").strip()
+        user = str(record.get("proxy_username") or "").strip()
+        password = str(record.get("proxy_password") or "").strip()
+        hosts = pool.normalize_hosts(record.get("proxy_ips")) or harvested.get(user) or []
+        if not hosts:
+            missing.append(email)
+            per_account.append({"email": email, "scanned": 0, "accepted": 0})
+            continue
+        fresh = []
+        for host in hosts:
+            identity = proxy_quality.proxy_identity(f"{scheme}://{host}")
+            if not identity or identity in seen:
+                continue
+            seen.add(identity)
+            fresh.append(host)
+        if not fresh:
+            per_account.append({"email": email, "scanned": 0, "accepted": 0})
+            continue
+        accepted_hosts, report = proxy_quality.filter_host_list(
+            fresh, user, password, settings=config, data_dir=WEB_DATA_DIR, scheme=scheme,
+        )
+        for row in report.get("results") or []:
+            if row.get("ok"):
+                accepted += 1
+            else:
+                rejected += 1
+                reasons[str(row.get("reason") or "unknown")] += 1
+        scanned += int(report.get("scanned") or 0)
+        for host in accepted_hosts:
+            lines.append(worker._format_proxy_url(user, password, host, protocol=scheme))
+        per_account.append({"email": email, "scanned": len(fresh), "accepted": int(report.get("accepted") or 0)})
+    ranked = sorted(reasons.items(), key=lambda pair: (-pair[1], pair[0]))[:12]
+    return lines, {
+        "accepted": accepted,
+        "rejected": rejected,
+        "scanned": scanned,
+        "reasons": [{"reason": reason, "count": count} for reason, count in ranked],
+        "accounts": per_account,
+        "missing": missing,
+    }
+
+
+@app.post("/api/accounts/export-qualified-proxies")
+def export_qualified_proxies():
+    payload = request.get_json(silent=True) or {}
+    emails = _normalize_email_list(payload.get("emails") or [])
+    if not emails:
+        return jsonify({"error": "请先勾选账号"}), 400
+    wanted = {item.lower() for item in emails}
+    by_email = {str(item.get("email") or "").lower(): item for item in _account_records()}
+    records = []
+    not_found = []
+    for email in emails:
+        record = by_email.get(email.lower())
+        if record:
+            records.append(record)
+        else:
+            not_found.append(email)
+    if not_found and not records:
+        return jsonify({"error": "没有找到对应的账号", "missing": not_found}), 404
+    try:
+        protocol_raw = (
+            request.args.get("protocol")
+            or request.args.get("scheme")
+            or payload.get("protocol")
+            or payload.get("scheme")
+        )
+        protocol = _resolve_export_protocol(protocol_raw)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    lines, report = _qualified_export_lines(records, protocol=protocol)
+    report["missing"] = list(report.get("missing") or []) + not_found
+    return jsonify({
+        "ok": True,
+        "body": "\n".join(lines) + ("\n" if lines else ""),
+        **report,
+    })
+
+
 @app.get("/api/accounts/<path:email>")
 def account_detail(email):
     record = _find_account(email)

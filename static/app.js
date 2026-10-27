@@ -515,10 +515,15 @@ function selectedAccountEmails() {
 }
 
 function updateDeleteSelectedState() {
-  const button = document.getElementById('deleteSelectedAccounts');
   const selected = selectedAccountEmails();
+  const button = document.getElementById('deleteSelectedAccounts');
   button.disabled = selected.length === 0;
   button.textContent = selected.length ? `删除所选 (${selected.length})` : '删除所选';
+  const exportButton = document.getElementById('exportQualifiedProxies');
+  if (exportButton && !exportButton.dataset.busy) {
+    exportButton.disabled = selected.length === 0;
+    exportButton.textContent = selected.length ? `导出质检代理 (${selected.length})` : '导出质检代理';
+  }
 }
 
 async function loadAccounts() {
@@ -912,6 +917,45 @@ async function syncUsage(emails) {
   }
 }
 
+async function exportQualifiedProxies(emails) {
+  const button = document.getElementById('exportQualifiedProxies');
+  if (!emails.length) {
+    toast('请先勾选要导出的账号', true);
+    return;
+  }
+  button.disabled = true;
+  button.dataset.busy = '1';
+  const original = button.textContent;
+  button.textContent = '质检中…';
+  try {
+    const data = await api('/api/accounts/export-qualified-proxies', {
+      method: 'POST',
+      body: JSON.stringify({ emails }),
+    });
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+    const blob = new Blob([data.body || ''], { type: 'text/plain;charset=utf-8' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `qualified-proxies-${stamp}.txt`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(link.href);
+    const missingText = data.missing?.length ? `，${data.missing.length} 个账号没有代理文件` : '';
+    toast(`质检完成：通过 ${data.accepted} / 共 ${data.scanned}，淘汰 ${data.rejected}${missingText}`, Boolean(data.rejected));
+    if (data.missing?.length) {
+      toast(`未找到代理：${data.missing.join('、')}`, true);
+    }
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    delete button.dataset.busy;
+    button.disabled = false;
+    button.textContent = original;
+    updateDeleteSelectedState();
+  }
+}
+
 document.getElementById('syncApiKeyButton').addEventListener('click', async () => {
   const email = document.getElementById('acc_email').value;
   const button = document.getElementById('syncApiKeyButton');
@@ -944,6 +988,9 @@ document.getElementById('accountSelectAll').addEventListener('change', event => 
 });
 document.getElementById('syncUsageButton').addEventListener('click', () => {
   syncUsage(selectedAccountEmails());
+});
+document.getElementById('exportQualifiedProxies').addEventListener('click', () => {
+  exportQualifiedProxies(selectedAccountEmails());
 });
 document.getElementById('importAccountsButton').addEventListener('click', () => {
   document.getElementById('importText').value = '';
