@@ -60,6 +60,31 @@ class DashboardApiTests(unittest.TestCase):
             self.assertIn("favicon.ico", body)
             self.assertIn("apple-touch-icon", body)
 
+    def test_fonts_are_self_hosted(self):
+        """CSP forbids third-party stylesheets, so fonts must be local."""
+        # Dashboard (needs a session) and login (needs none) both load the same CSS.
+        login_body = self.client.get("/login").get_data(as_text=True)
+        self.authenticate()
+        index_body = self.client.get("/").get_data(as_text=True)
+        for path, body in (("/login", login_body), ("/", index_body)):
+            self.assertNotIn("fonts.googleapis.com", body, path)
+            self.assertNotIn("fonts.gstatic.com", body, path)
+            self.assertIn("fonts/fonts.css", body, path)
+
+    def test_local_font_assets_are_served(self):
+        css = self.client.get("/static/fonts/fonts.css")
+        self.assertEqual(css.status_code, 200)
+        self.assertTrue(css.mimetype.startswith("text/css"), css.mimetype)
+        text = css.get_data(as_text=True)
+        # Every advertised file must exist and be served with a font MIME type.
+        files = sorted(set(re.findall(r"url\('([^']+\.woff2)'\)", text)))
+        self.assertGreaterEqual(len(files), 8)
+        for name in files:
+            asset = self.client.get(f"/static/fonts/{name}")
+            self.assertEqual(asset.status_code, 200, name)
+            self.assertTrue(asset.mimetype.startswith("font/"), f"{name} {asset.mimetype}")
+            self.assertGreater(len(asset.data), 1000, name)
+
     def test_dashboard_requires_login(self):
         self.assertEqual(self.client.get("/api/dashboard").status_code, 401)
 

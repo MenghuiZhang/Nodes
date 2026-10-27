@@ -33,6 +33,7 @@ Nodes 是一个面向 ProxyScrape 账户注册、邮箱验证、试用代理领�
 | `filter_xai_proxies.py` | 代理可用性批量检测工具 |
 | `deploy/patch_playwright_driver.py` | Playwright Firefox 驱动补丁（Turnstile iframe 竞态） |
 | `deploy/make_icons.py` | 生成 favicon / App 图标（纯标准库，无需 Pillow） |
+| `static/fonts/` | 自托管 Web 字体（Inter 可变 + IBM Plex Mono）与 OFL 许可证 |
 | `templates/`、`static/` | 中文响应式 Web 前端 |
 | `compose.yml`、`Dockerfile` | Docker 构建与部署配置 |
 | `DEPLOYMENT.md` | 服务器部署与维护补充说明 |
@@ -229,10 +230,28 @@ git diff --check
 
 确认已有有效库存、导出令牌正确、质量规则没有排除全部节点，并从服务器本机请求导出 URL 检查状态和响应内容。
 
+## 字体与图标
+
+控制台字体自托管在 `static/fonts/`，不再依赖 Google Fonts：
+
+- `Inter` 可变字体（400–800）一个文件覆盖全部字重
+- `IBM Plex Mono` 400 / 500 / 600 三档，无可变版本
+- 均按 `latin` / `latin-ext` 子集切分，带 `unicode-range`，浏览器只下用到的部分
+- 总计约 190 KB，`fonts.css` 里带完整 `@font-face`
+
+页面 CSP 为 `default-src 'self'; style-src 'self'`，所以第三方字体样式表本来就会被拦。自托管后无需放开 CSP，也不会有外部请求。
+
+字体为 SIL Open Font License 1.1，许可证随文件放在 `static/fonts/OFL-Inter.txt` 和 `OFL-IBM-Plex.txt`。
+
+图标由 `deploy/make_icons.py` 生成（纯标准库，不需要 Pillow 或 cairo）。改配色或字母后重新跑一次即可：
+
+```bash
+python deploy/make_icons.py
+```
+
 ## 数据与安全
 
-- `config.local.json`、账户文件、代理文件、Token、日志和备份可能包含敏感信息。
-- 不要提交真实 API Key、Cookie、会话密钥、服务器密码、代理凭据或生产私有信息。
+- `config.local.json`、账户文件、代理文件、Token、日志和备份可能包含敏感信息。- 不要提交真实 API Key、Cookie、会话密钥、服务器密码、代理凭据或生产私有信息。
 - 建议配置和凭据文件使用 `0600` 权限，数据目录使用 `0700` 权限。
 - 对外部署时使用 HTTPS、强密码、随机导出令牌，并通过防火墙限制管理入口。
 - 定期轮换邮箱 API Key、验证码服务 Key、Web 会话密钥和导出令牌。
