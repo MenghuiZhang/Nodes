@@ -1211,6 +1211,19 @@ def health():
     return jsonify({"status": "ok", "service": "nodes-dashboard"})
 
 
+@app.get("/favicon.ico")
+def favicon():
+    """Browsers request /favicon.ico at the site root, not under /static."""
+    return send_from_directory(
+        app.static_folder, "favicon.ico", mimetype="image/vnd.microsoft.icon",
+    )
+
+
+@app.get("/apple-touch-icon.png")
+def apple_touch_icon():
+    return send_from_directory(app.static_folder, "apple-touch-icon.png")
+
+
 @app.get("/api")
 def provider_compat_api():
     """Compatibility endpoint for the external proxy-pool URL contract (port 8892)."""
@@ -1398,6 +1411,8 @@ def protect_routes():
     if request.endpoint in {
         "login",
         "health",
+        "favicon",
+        "apple_touch_icon",
         "static",
         "live_proxies",
         "gpt_gateway",

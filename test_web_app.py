@@ -43,6 +43,23 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json["status"], "ok")
 
+    def test_favicon_is_public_and_not_redirected(self):
+        for path, mimetype in (
+            ("/favicon.ico", "image/vnd.microsoft.icon"),
+            ("/apple-touch-icon.png", "image/png"),
+        ):
+            response = self.client.get(path)
+            self.assertEqual(response.status_code, 200, path)
+            self.assertTrue(response.mimetype.startswith(mimetype), response.mimetype)
+            self.assertGreater(len(response.data), 100, path)
+
+    def test_pages_link_the_icon_set(self):
+        for path in ("/login",):
+            body = self.client.get(path).get_data(as_text=True)
+            self.assertIn('rel="icon"', body)
+            self.assertIn("favicon.ico", body)
+            self.assertIn("apple-touch-icon", body)
+
     def test_dashboard_requires_login(self):
         self.assertEqual(self.client.get("/api/dashboard").status_code, 401)
 

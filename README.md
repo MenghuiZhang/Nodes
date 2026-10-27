@@ -32,6 +32,7 @@ Nodes 是一个面向 ProxyScrape 账户注册、邮箱验证、试用代理领�
 | `platform_store.py` | 平台配置与持久化 |
 | `filter_xai_proxies.py` | 代理可用性批量检测工具 |
 | `deploy/patch_playwright_driver.py` | Playwright Firefox 驱动补丁（Turnstile iframe 竞态） |
+| `deploy/make_icons.py` | 生成 favicon / App 图标（纯标准库，无需 Pillow） |
 | `templates/`、`static/` | 中文响应式 Web 前端 |
 | `compose.yml`、`Dockerfile` | Docker 构建与部署配置 |
 | `DEPLOYMENT.md` | 服务器部署与维护补充说明 |
