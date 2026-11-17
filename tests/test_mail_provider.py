@@ -20,10 +20,19 @@ class ExtractCodeTests(unittest.TestCase):
         )
 
     def test_code_is_variant(self):
+        # 提取结果统一小写（服务端按原始小写码校验）
         self.assertEqual(
             register.extract_verification_code("Your ProxyScrape code is: Ab12Cd34Ef"),
-            "Ab12Cd34Ef",
+            "ab12cd34ef",
         )
+
+    def test_html_lowercase_wins_over_uppercase_plain(self):
+        # 真实场景：text/plain 版被发送方写成大写，text/html 版保留原始小写码。
+        # cf_temp_wait_code 先从 html 提取（原码），html 落空才走 plain 并转小写。
+        html = "<div style=\"text-transform:uppercase\">Your code: df0969d629</div>"
+        plain = "YOUR CODE: DF0969D629"
+        self.assertEqual(register.extract_verification_code(html, fallback=False), "df0969d629")
+        self.assertEqual(register.extract_verification_code(plain), "df0969d629")
 
     def test_html_wrapped(self):
         html = ("<div><span style=\"font-size:32px\">Your code:</span> "

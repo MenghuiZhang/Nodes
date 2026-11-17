@@ -510,8 +510,11 @@ def cf_temp_wait_code(address, jwt=None, timeout=180, interval=5):
                 mail_id = str(m.get("id") or m.get("mail_id") or "")
                 if not mail_id or mail_id in seen or mail_id in matched_ids:
                     continue
-                # 列表字段可能直接带正文/预览
-                blobs = [str(m.get(k) or "") for k in ("text", "preview", "subject", "html")]
+                # 列表字段可能直接带正文/预览。顺序很重要：
+                # 验证码邮件的 text/plain 版被发送方写成大写（CSS 同款显示），
+                # 而 text/html 版保留原始小写真码——html 必须先于 text 尝试。
+                html_blobs = [str(m.get(k) or "") for k in ("html", "preview")]
+                text_blobs = [str(m.get(k) or "") for k in ("text", "subject")]
                 # 拉详情拿全文
                 detail_ok = False
                 try:
@@ -521,16 +524,24 @@ def cf_temp_wait_code(address, jwt=None, timeout=180, interval=5):
                     d = d.get("result") or d.get("data") or d
                     if isinstance(d, dict):
                         detail_ok = True
-                        blobs.extend(str(d.get(k) or "") for k in ("text", "html", "message", "raw"))
+                        html_blobs.extend(str(d.get(k) or "") for k in ("html", "message"))
+                        text_blobs.extend(str(d.get(k) or "") for k in ("text", "raw"))
                         if isinstance(d.get("html"), list):
-                            blobs.extend(str(x) for x in d["html"])
+                            html_blobs.extend(str(x) for x in d["html"])
                 except Exception:
                     pass
                 if not detail_ok:
                     continue  # 详情没拿到：不标记，下轮重试
                 seen.add(mail_id)
-                blob = _strip_html_to_text(" ".join(blobs))
-                code = extract_verification_code(blob)
+                code = None
+                # ① 先从 HTML 提取（原始小写码）
+                html_blob = _strip_html_to_text(" ".join(html_blobs))
+                code = extract_verification_code(html_blob, fallback=False)
+                # ② HTML 没有（比如只有 plain 版）再从 text 提取，结果转小写
+                if not code:
+                    text_blob = _strip_html_to_text(" ".join(text_blobs))
+                    code = extract_verification_code(text_blob)
+                blob = html_blob or text_blob
                 if code:
                     matched_ids.add(mail_id)
                     log(f"收到验证码: {code}  (主题: {m.get('subject')})")
