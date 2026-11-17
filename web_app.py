@@ -6,6 +6,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import threading
 import time
 from collections import defaultdict, deque
@@ -42,6 +43,7 @@ NODE_DIR = Path(os.environ.get("NODES_NODE_DIR", BASE_DIR / "node"))
 WEB_DATA_DIR = Path(os.environ.get("NODES_WEB_DATA_DIR", BASE_DIR / "web-data"))
 CONFIG_FILE = Path(os.environ.get("NODES_CONFIG_FILE", BASE_DIR / "config.local.json"))
 TASKS_FILE = WEB_DATA_DIR / "tasks.json"
+SCREENSHOT_DIR = WEB_DATA_DIR / "screenshots"
 
 ACCOUNT_DIR.mkdir(parents=True, exist_ok=True)
 NODE_DIR.mkdir(parents=True, exist_ok=True)
@@ -55,6 +57,19 @@ def _read_config():
         return value if isinstance(value, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+def _prune_screenshot_dirs(current_root, keep=20):
+    """截图目录按任务保留最近 keep 个，超出删最旧的。"""
+    try:
+        roots = [p for p in SCREENSHOT_DIR.iterdir() if p.is_dir()]
+    except OSError:
+        return
+    roots.sort(key=lambda p: p.name)
+    for stale in roots[:-keep] if len(roots) > keep else []:
+        if stale.resolve() == Path(current_root).resolve():
+            continue
+        shutil.rmtree(stale, ignore_errors=True)
 
 
 def _as_bool(value):
@@ -954,6 +969,11 @@ class TaskStore:
             task.setdefault("logs", []).append(message[:300])
             task["logs"] = task["logs"][-100:]
             self._save()
+        try:
+            import applog
+            applog.write(message[:300], f" [task:{task_id}]")
+        except Exception:
+            pass
 
     def _run(self, task_id):
         task = self.get(task_id)
@@ -963,9 +983,13 @@ class TaskStore:
         self._event(task_id, "注册 worker 已启动")
         account_path = str(ACCOUNT_DIR / task["account_file"])
         proxy_path = str(NODE_DIR / task["proxy_file"])
+        shots_root = SCREENSHOT_DIR / task_id
+        _prune_screenshot_dirs(shots_root)
 
         def execute(index):
-            return worker.register_one(index, True, account_path, proxy_path)
+            shots_dir = str(shots_root / f"{index:02d}")
+            return worker.register_one(index, True, account_path, proxy_path,
+                                       shots_dir=shots_dir)
 
         with ThreadPoolExecutor(max_workers=task["concurrency"]) as executor:
             futures = {
@@ -1397,7 +1421,7 @@ def _start_pool_loop():
                 time.sleep(int(settings["loop_seconds"]))
                 pruned = _prune_expired_accounts()
                 if pruned:
-                    print(f"[pool] auto-removed {len(pruned)} expired account(s)")
+                    worker.log(f"[pool] auto-removed {len(pruned)} expired account(s)")
                 _maybe_fill_capacity(auto_register=True)
             except Exception:
                 time.sleep(30)
@@ -2583,6 +2607,51 @@ def task_detail(task_id):
     if not task:
         abort(404)
     return jsonify({"task": task})
+
+
+@app.get("/api/tasks/<task_id>/shots")
+def task_shots(task_id):
+    """任务的过程截图清单：按账号分组，账号内按尝试次数分组。"""
+    if not TASK_STORE.get(task_id):
+        abort(404)
+    root = SCREENSHOT_DIR / task_id
+    groups = []
+    if root.is_dir():
+        safe_chars = re.compile(r"[^A-Za-z0-9._-]")
+        for account_dir in sorted(root.iterdir()):
+            if not account_dir.is_dir():
+                continue
+            attempts = []
+            for attempt_dir in sorted(account_dir.iterdir()):
+                if not attempt_dir.is_dir():
+                    continue
+                files = sorted(
+                    p.name for p in attempt_dir.iterdir()
+                    if p.is_file() and p.suffix.lower() == ".png"
+                )
+                if files:
+                    attempts.append({
+                        "attempt": attempt_dir.name,
+                        "files": [
+                            # URL 片段只含白名单字符；文件名本身来自我们的 _shot 命名
+                            {"name": f, "url": f"/screenshots/{safe_chars.sub('_', task_id)}/{safe_chars.sub('_', account_dir.name)}/{safe_chars.sub('_', attempt_dir.name)}/{safe_chars.sub('_', f)}"}
+                            for f in files
+                        ],
+                    })
+            if attempts:
+                groups.append({"account": account_dir.name, "attempts": attempts})
+    return jsonify({"task_id": task_id, "groups": groups})
+
+
+@app.get("/screenshots/<task_id>/<account>/<attempt>/<path:filename>")
+def screenshot_file(task_id, account, attempt, filename):
+    """注册过程截图：仅允许白名单字符的路径段与 .png，防路径穿越。"""
+    for part in (task_id, account, attempt, filename):
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", part) or ".." in part:
+            abort(404)
+    if not filename.lower().endswith(".png"):
+        abort(404)
+    return send_from_directory(SCREENSHOT_DIR, f"{task_id}/{account}/{attempt}/{filename}")
 
 
 @app.get("/api/settings")

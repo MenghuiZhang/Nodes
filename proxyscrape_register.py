@@ -254,6 +254,56 @@ def log(msg):
     tag = getattr(_tls, "tag", "")
     with _print_lock:
         print(f"[{time.strftime('%H:%M:%S')}]{tag} {msg}", flush=True)
+    try:
+        import applog
+        applog.write(msg, tag)
+    except Exception:
+        pass  # 落盘失败不影响业务
+
+
+# 验证码短语模式：ProxyScrape 邮件模板改版过（旧 "verification code: xxx" →
+# 新 "Your code: xxx"），这里按序尝试多种措辞，避免模板再变就抓瞎。
+_CODE_PHRASE_RES = [
+    r"verification\s*code(?:\s+is)?",
+    r"your\s+code",
+    r"code\s+is",
+    r"验证码(?:是|为)?",
+]
+
+
+def _strip_html_to_text(blob):
+    """HTML 去标签 + 实体还原，取不到内容时原样返回。"""
+    if not blob:
+        return ""
+    return _html.unescape(re.sub(r"<[^>]+>", " ", str(blob)))
+
+
+def extract_verification_code(text, fallback=True):
+    """从邮件文本提取 ProxyScrape 验证码（10 位左右字母数字混合）。
+
+    1) 短语模式按序匹配（verification code / your code / code is / 验证码…）
+    2) 兜底启发式：找独立 token，长度 8-16、同时含字母和数字——
+       排除纯字母单词、纯数字、URL 片段与日期，避免误抓
+    返回 None 表示没匹配到（调用方负责记录诊断日志）。"""
+    plain = _strip_html_to_text(text)
+    if not plain:
+        return None
+    for phrase in _CODE_PHRASE_RES:
+        mo = re.search(phrase + r"\s*[:：]?\s*([A-Za-z0-9]{6,16})", plain, re.I)
+        if mo:
+            return mo.group(1)
+    if not fallback:
+        return None
+    for token in re.findall(r"[A-Za-z0-9]+", plain):
+        if not 8 <= len(token) <= 16:
+            continue
+        if not (re.search(r"[A-Za-z]", token) and re.search(r"[0-9]", token)):
+            continue
+        if token.lower() in {"proxy", "proxyscrape", "verification", "premium", "datacenter"}:
+            continue
+        log(f"[?] 短语未命中，兜底提取验证码: {token}")
+        return token
+    return None
 
 
 def _retry(fn, tries=3, delay=2.0, what=""):
@@ -342,14 +392,18 @@ def yyds_wait_code(address, timeout=180, interval=5):
         for m in lst.get("data", {}).get("messages", []):
             d = requests.get(f"{YYDS_BASE}/messages/{m['id']}", headers=hdr,
                              params={"address": address}, timeout=30).json().get("data", {})
-            html = " ".join(d.get("html") or [])
-            txt = _html.unescape(re.sub(r"<[^>]+>", " ", html))
-            mo = re.search(r"verification code:\s*([A-Za-z0-9]{6,})", txt, re.I)
-            if mo:
-                log(f"收到验证码: {mo.group(1)}  (主题: {d.get('subject')})")
-                return mo.group(1)
+            # html 字段可能是列表也可能是字符串（str 会被 join 切成单字符）
+            raw_html = d.get("html")
+            if isinstance(raw_html, list):
+                raw_html = " ".join(str(x) for x in raw_html)
+            blob = f"{d.get('subject') or ''} {raw_html or ''} {d.get('text') or ''}"
+            txt = _strip_html_to_text(blob)
+            code = extract_verification_code(txt)
+            if code:
+                log(f"收到验证码: {code}  (主题: {d.get('subject')})")
+                return code
         time.sleep(interval)
-    raise TimeoutError("等验证码超时")
+    raise TimeoutError("等验证码超时（收件箱无匹配邮件或正文不含验证码）")
 
 
 # ── Cloudflare Temp Email（自建Worker，管理员API）────────
@@ -416,6 +470,7 @@ def cf_temp_create_mailbox():
             continue
         _cf_temp_record_result(domain, True, "创邮成功")
         _CF_LAST_JWT = jwt
+        _tls.cf_jwt = jwt  # 线程本地持有，避免并发时全局 JWT 串号
         log(f"临时邮箱: {email}")
         return email, jwt
 
@@ -440,7 +495,8 @@ def cf_temp_wait_code(address, jwt=None, timeout=180, interval=5):
         raise RuntimeError("cf_temp 缺少邮箱 JWT（先建邮）")
     base, admin = _cf_temp_config()
     deadline = time.time() + timeout
-    seen = set()
+    seen = set()          # 详情解析成功后才标记（详情失败下次重试）
+    matched_ids = set()   # 已确认是验证码邮件（避免重复解析）
     while time.time() < deadline:
         try:
             r = requests.get(f"{base}/api/mails", params={"limit": 20, "offset": 0},
@@ -450,33 +506,40 @@ def cf_temp_wait_code(address, jwt=None, timeout=180, interval=5):
             mails = mails.get("results") if isinstance(mails, dict) else mails
             for m in mails or []:
                 mail_id = str(m.get("id") or m.get("mail_id") or "")
-                if mail_id and mail_id in seen:
+                if not mail_id or mail_id in seen or mail_id in matched_ids:
                     continue
-                seen.add(mail_id)
                 # 列表字段可能直接带正文/预览
                 blobs = [str(m.get(k) or "") for k in ("text", "preview", "subject", "html")]
                 # 拉详情拿全文
+                detail_ok = False
                 try:
                     d = requests.get(f"{base}/api/mail/{mail_id}",
                                      headers={"x-custom-auth": admin, "Authorization": f"Bearer {jwt}"},
                                      timeout=15).json()
                     d = d.get("result") or d.get("data") or d
                     if isinstance(d, dict):
+                        detail_ok = True
                         blobs.extend(str(d.get(k) or "") for k in ("text", "html", "message", "raw"))
                         if isinstance(d.get("html"), list):
                             blobs.extend(str(x) for x in d["html"])
                 except Exception:
                     pass
-                blob = _html.unescape(" ".join(blobs))
-                blob = re.sub(r"<[^>]+>", " ", blob)
-                mo = re.search(r"verification code:\s*([A-Za-z0-9]{6,})", blob, re.I)
-                if mo:
-                    log(f"收到验证码: {mo.group(1)}  (主题: {m.get('subject')})")
-                    return mo.group(1)
+                if not detail_ok:
+                    continue  # 详情没拿到：不标记，下轮重试
+                seen.add(mail_id)
+                blob = _strip_html_to_text(" ".join(blobs))
+                code = extract_verification_code(blob)
+                if code:
+                    matched_ids.add(mail_id)
+                    log(f"收到验证码: {code}  (主题: {m.get('subject')})")
+                    return code
+                # 有邮件但没提到码：记诊断片段，便于发现模板改版/措辞变化
+                log(f"[?] 邮件无匹配验证码  id={mail_id} 主题={str(m.get('subject'))[:80]} "
+                    f"正文: {blob[:150]!r}")
         except Exception as e:
             log(f"[!] cf_temp 收件轮询异常: {str(e)[:80]}")
         time.sleep(interval)
-    raise TimeoutError("等验证码超时")
+    raise TimeoutError("等验证码超时（收件箱无匹配邮件或正文不含验证码）")
 
 
 # ── 云芯邮箱 HTTPS API ──────────────────────────────────
@@ -517,15 +580,8 @@ def _code_from_yunxin_mail(mail):
 
     html = str(mail.get("html") or "")
     plain = " ".join(str(mail.get(key) or "") for key in ("subject", "from", "text", "content"))
-    plain += " " + _html.unescape(re.sub(r"<[^>]+>", " ", html))
-    for pattern in (
-        r"verification\s*code(?:\s+is)?\s*[:：]?\s*([A-Za-z0-9]{6,16})",
-        r"验证码(?:是|为)?\s*[:：]?\s*([A-Za-z0-9]{6,16})",
-    ):
-        match = re.search(pattern, plain, re.I)
-        if match:
-            return match.group(1)
-    return ""
+    plain += " " + _strip_html_to_text(html)
+    return extract_verification_code(plain)
 
 
 def yunxin_wait_code(address, timeout=180, interval=5):
@@ -765,6 +821,24 @@ def _probe_exit_ip(proxy_url, timeout=12):
     return ""
 
 
+def _shots_dir():
+    """当前线程的截图目录（TaskStore 经 _tls 设置；CLI/未设置时为 None）。"""
+    return getattr(_tls, "shots_dir", None)
+
+
+def _shot(page, name):
+    """注册过程截图：页面打开/挂载/点击/拿到 token/失败现场。失败静默。"""
+    d = _shots_dir()
+    if not d:
+        return
+    try:
+        os.makedirs(d, exist_ok=True)
+        page.screenshot(path=os.path.join(d, f"{name}.png"), full_page=True)
+        log(f"截图 {name}.png")
+    except Exception as exc:
+        log(f"[!] 截图 {name} 失败: {str(exc)[:80]}")
+
+
 def solve_turnstile_browser(headless=True, timeout=180):
     """Camoufox（Firefox 反检测内核）打开真实 sign-up 页过 Turnstile：
       1) 启动 Camoufox（指纹伪装原生内置，无需扩展），带上游代理并做 geoip 对齐
@@ -811,69 +885,88 @@ def solve_turnstile_browser(headless=True, timeout=180):
             page.add_init_script(_SHADOW_PATCH_JS)
         except Exception as exc:
             log(f"[!] attachShadow 钩子注入失败: {exc}")
-        log("Camoufox 打开 sign-up 页…")
-        page.goto(PS_SIGNUP_PAGE, wait_until="domcontentloaded", timeout=60000)
+        try:
+            _solve_turnstile_on_page(page, deadline)
+        except BaseException:
+            # 兜底：任何未预期的异常路径都留一张现场截图（已知路径已各自截图）
+            _shot(page, "error-exception")
+            raise
 
-        # ① 等 cf-turnstile-response input 挂载（sign-up 页是隐式渲染 widget，
-        #    顶层没有 window.turnstile API，不能拿 hasApi 当就绪条件）
-        while time.time() < deadline:
-            st = _read_state(page)
-            if st.get("hasInput"):
-                break
-            page.wait_for_timeout(500)
-        else:
-            raise TimeoutError("等待 cf-turnstile-response 挂载超时")
-        log("检测到 turnstile input 已挂载")
 
-        # ② 填占位表单触发 widget 激活。challenge iframe 藏在 closed shadow DOM,
-        #    顶层 hasIframe 永远是 false,不能拿来当阶段门;预热即得的 token
-        #    与点击都在下面的轮询里处理。
-        page.evaluate("() => {%s}" % _FILL_JS)
+def _solve_turnstile_on_page(page, deadline):
+    """在已打开的 sign-up 页上求解 Turnstile（solve_turnstile_browser 的主体）。"""
+    log("Camoufox 打开 sign-up 页…")
+    page.goto(PS_SIGNUP_PAGE, wait_until="domcontentloaded", timeout=60000)
+    _shot(page, "01-open")
 
-        # ③ 轮询 token；每 10s 未出 token 就重新点击 checkbox（最多 8 次）。
-        #    checkbox 中心实测在 widget 左侧约 49px（300x65 widget），点偏了不生效。
-        last_click = 0.0
-        clicks = 0
-        while time.time() < deadline:
-            st = _read_state(page)
-            token = st.get("token") or _shadow_token(page)
-            if len(token) >= 80:
-                log(f"Turnstile 通过，token 长度={len(token)}（共点击 {clicks} 次）")
-                return token
-            try:
-                cb = str(page.evaluate("() => String(window.__ps_token || '')") or "").strip()
-                if len(cb) >= 80:
-                    log(f"Turnstile 通过（render 回调），token 长度={len(cb)}")
-                    return cb
-            except Exception:
-                pass
+    # ① 等 cf-turnstile-response input 挂载（sign-up 页是隐式渲染 widget，
+    #    顶层没有 window.turnstile API，不能拿 hasApi 当就绪条件）
+    while time.time() < deadline:
+        st = _read_state(page)
+        if st.get("hasInput"):
+            break
+        page.wait_for_timeout(500)
+    else:
+        _shot(page, "error-input-timeout")
+        raise TimeoutError("等待 cf-turnstile-response 挂载超时")
+    log("检测到 turnstile input 已挂载")
+    _shot(page, "02-mounted")
 
-            # 10s 仍无 token：上一次点击多半没落在 checkbox 上，重新定位再点。
-            # 首次点击立即执行（last_click=0）；间隔 10s 保证不在 Verifying 中重复点击。
-            if clicks < 8 and time.time() - last_click >= 10.0:
-                box = _challenge_box(page)
-                if box and box.get("width", 0) >= 100 and box.get("height", 0) >= 40:
-                    x = int(box["x"] + min(49, box["width"] * 0.2))
-                    y = int(box["y"] + box["height"] / 2)
-                    try:
-                        page.mouse.move(x - 80, y - 60, steps=6)
-                        page.mouse.move(x, y, steps=8)
-                        page.wait_for_timeout(120)
-                        page.mouse.click(x, y)
-                        clicks += 1
-                        last_click = time.time()
-                        log(f"已点击 Turnstile checkbox ({x},{y}) 第 {clicks}/8 次")
-                    except Exception as exc:
-                        log(f"[!] 点击 challenge 失败: {exc}")
+    # ② 填占位表单触发 widget 激活。challenge iframe 藏在 closed shadow DOM,
+    #    顶层 hasIframe 永远是 false,不能拿来当阶段门;预热即得的 token
+    #    与点击都在下面的轮询里处理。
+    page.evaluate("() => {%s}" % _FILL_JS)
+    _shot(page, "03-filled")
 
-            try:
-                text = str(page.evaluate("() => document.body ? document.body.innerText : ''") or "").lower()
-            except Exception:
-                text = ""
-            if "verification failed" in text:
-                raise RuntimeError("Turnstile Verification failed（出口 IP 信誉可能较差）")
-            page.wait_for_timeout(1000)
-        raise TimeoutError(f"Turnstile 求解超时（已点击 {clicks} 次，token 未生成）")
+    # ③ 轮询 token；每 10s 未出 token 就重新点击 checkbox（最多 8 次）。
+    #    checkbox 中心实测在 widget 左侧约 49px（300x65 widget），点偏了不生效。
+    last_click = 0.0
+    clicks = 0
+    while time.time() < deadline:
+        st = _read_state(page)
+        token = st.get("token") or _shadow_token(page)
+        if len(token) >= 80:
+            log(f"Turnstile 通过，token 长度={len(token)}（共点击 {clicks} 次）")
+            _shot(page, "05-token")
+            return token
+        try:
+            cb = str(page.evaluate("() => String(window.__ps_token || '')") or "").strip()
+            if len(cb) >= 80:
+                log(f"Turnstile 通过（render 回调），token 长度={len(cb)}")
+                _shot(page, "05-token")
+                return cb
+        except Exception:
+            pass
+
+        # 10s 仍无 token：上一次点击多半没落在 checkbox 上，重新定位再点。
+        # 首次点击立即执行（last_click=0）；间隔 10s 保证不在 Verifying 中重复点击。
+        if clicks < 8 and time.time() - last_click >= 10.0:
+            box = _challenge_box(page)
+            if box and box.get("width", 0) >= 100 and box.get("height", 0) >= 40:
+                x = int(box["x"] + min(49, box["width"] * 0.2))
+                y = int(box["y"] + box["height"] / 2)
+                try:
+                    page.mouse.move(x - 80, y - 60, steps=6)
+                    page.mouse.move(x, y, steps=8)
+                    page.wait_for_timeout(120)
+                    page.mouse.click(x, y)
+                    clicks += 1
+                    last_click = time.time()
+                    log(f"已点击 Turnstile checkbox ({x},{y}) 第 {clicks}/8 次")
+                    _shot(page, f"04-click-{clicks}")
+                except Exception as exc:
+                    log(f"[!] 点击 challenge 失败: {exc}")
+
+        try:
+            text = str(page.evaluate("() => document.body ? document.body.innerText : ''") or "").lower()
+        except Exception:
+            text = ""
+        if "verification failed" in text:
+            _shot(page, "error-verification-failed")
+            raise RuntimeError("Turnstile Verification failed（出口 IP 信誉可能较差）")
+        page.wait_for_timeout(1000)
+    _shot(page, "error-solve-timeout")
+    raise TimeoutError(f"Turnstile 求解超时（已点击 {clicks} 次，token 未生成）")
 
 
 def _captcha_post(path, payload):
@@ -1331,7 +1424,8 @@ def save_account(rec, path):
 
 def _register_once(headless, node_file):
     """单次尝试：建邮箱→打码→注册→验证→拉代理。返回 rec（不落盘账号）。
-    建邮箱/打码/注册任一失败抛异常，交给外层重试。"""
+    建邮箱/打码/注册任一失败抛异常，交给外层重试。
+    截图目录由调用方经 set_shots_dir 预先设置（CLI 路径不设置则不截图）。"""
     password = "Ps" + "".join(random.choices(string.ascii_letters + string.digits, k=10)) + "!9"
     email, _ = create_mailbox()                    # 失败抛异常 → 外层重试
     token = solve_turnstile(headless=headless)     # 失败抛异常 → 外层重试
@@ -1398,12 +1492,22 @@ def _register_once(headless, node_file):
     return record
 
 
-def register_one(idx, headless, acc_file, node_file, max_attempts=3):
+def set_shots_dir(path):
+    """设置当前线程的截图目录（None 关闭截图）。TaskStore 按 账号/尝试 分目录。"""
+    _tls.shots_dir = path
+
+
+def register_one(idx, headless, acc_file, node_file, max_attempts=3, shots_dir=None):
     """账号级重试：任一步异常或没拿到代理，就换新邮箱重来，直到成功或用尽。
-    成功（拿到代理）落盘并返回；用尽则落盘最后一次半成品（token 有效、无代理）。"""
+    成功（拿到代理）落盘并返回；用尽则落盘最后一次半成品（token 有效、无代理）。
+    shots_dir 非空时每次尝试的浏览器阶段截图到 <shots_dir>/attempt<N>/。"""
     _tls.tag = f" #{idx}"
+    if shots_dir:
+        set_shots_dir(shots_dir)
     last = None
     for attempt in range(1, max_attempts + 1):
+        if shots_dir:
+            set_shots_dir(os.path.join(shots_dir, f"attempt{attempt}"))
         if attempt > 1:
             log(f"—— 第 {attempt}/{max_attempts} 次尝试 ——")
         try:

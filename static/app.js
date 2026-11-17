@@ -697,8 +697,39 @@ async function openTask(taskId) {
       <div><span>状态</span><strong>${escapeHtml(statusLabel(task.status))}</strong></div>`;
     document.getElementById('dialogLogs').innerHTML = (task.logs || []).map(log => `<div class="log-entry">${escapeHtml(log)}</div>`).join('');
     document.getElementById('taskDialog').showModal();
+    loadTaskShots(taskId);
   } catch (error) {
     toast(error.message, true);
+  }
+}
+
+async function loadTaskShots(taskId) {
+  const block = document.getElementById('dialogShotsBlock');
+  const wrap = document.getElementById('dialogShots');
+  if (!block || !wrap) return;
+  block.hidden = true;
+  wrap.innerHTML = '';
+  try {
+    const { groups } = await api(`/api/tasks/${encodeURIComponent(taskId)}/shots`);
+    if (!groups || !groups.length) return;
+    wrap.innerHTML = groups.map(group => `
+      <div class="shots-account">
+        <div class="shots-account-label">${escapeHtml(group.account)}</div>
+        ${group.attempts.map(attempt => `
+          <div class="shots-attempt">
+            <div class="shots-attempt-label">${escapeHtml(attempt.attempt)}</div>
+            <div class="shots-grid">
+              ${attempt.files.map(file => `
+                <a class="shot-thumb" href="${escapeHtml(file.url)}" target="_blank" rel="noopener">
+                  <img src="${escapeHtml(file.url)}" alt="${escapeHtml(file.name)}" loading="lazy">
+                  <span>${escapeHtml(file.name)}</span>
+                </a>`).join('')}
+            </div>
+          </div>`).join('')}
+      </div>`).join('');
+    block.hidden = false;
+  } catch (error) {
+    // 截图缺失/加载失败静默：不是所有任务都有浏览器阶段产物
   }
 }
 

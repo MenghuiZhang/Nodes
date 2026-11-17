@@ -1683,6 +1683,59 @@ td.empty-cell {
   margin-top: 0;
 }
 
+/* Task dialog: registration step screenshots */
+#dialogShots {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.shots-account-label,
+.shots-attempt-label {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-bottom: 0.4rem;
+}
+
+.shots-attempt + .shots-attempt {
+  margin-top: 0.75rem;
+}
+
+.shots-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 0.55rem;
+}
+
+.shot-thumb {
+  display: grid;
+  gap: 0.3rem;
+  text-decoration: none;
+  color: var(--ink-soft);
+  font-size: 0.66rem;
+  font-family: var(--font-mono);
+}
+
+.shot-thumb img {
+  width: 100%;
+  aspect-ratio: 1280 / 900;
+  object-fit: cover;
+  border: 1px solid var(--line-strong);
+  border-radius: 0.5rem;
+  background: var(--paper-100);
+  transition: border-color 0.15s ease;
+}
+
+.shot-thumb:hover img {
+  border-color: var(--brand);
+}
+
+.shot-thumb span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Account Dialog Form Blocks */
 .account-form {
   padding: 1.15rem 1.35rem 1.35rem;

@@ -4,6 +4,58 @@ from unittest.mock import Mock, patch
 import proxyscrape_register as register
 
 
+class ExtractCodeTests(unittest.TestCase):
+    """验证码提取：覆盖新旧邮件模板与异常样例。"""
+
+    def test_new_template_your_code(self):
+        # 2026-11 改版后的真实邮件正文
+        text = ("VERIFY YOUR EMAIL Your code: 543337bd33 "
+                "Enter this code to verify your email address.")
+        self.assertEqual(register.extract_verification_code(text), "543337bd33")
+
+    def test_old_template_verification_code(self):
+        self.assertEqual(
+            register.extract_verification_code("Your verification code: d253ff02f7"),
+            "d253ff02f7",
+        )
+
+    def test_code_is_variant(self):
+        self.assertEqual(
+            register.extract_verification_code("Your ProxyScrape code is: Ab12Cd34Ef"),
+            "Ab12Cd34Ef",
+        )
+
+    def test_html_wrapped(self):
+        html = ("<div><span style=\"font-size:32px\">Your code:</span> "
+                "<b>543337bd33</b></div>")
+        self.assertEqual(register.extract_verification_code(html), "543337bd33")
+
+    def test_chinese_template(self):
+        self.assertEqual(
+            register.extract_verification_code("您的验证码是：a1b2c3d4e5 请勿泄露"),
+            "a1b2c3d4e5",
+        )
+
+    def test_no_code_returns_none(self):
+        self.assertIsNone(
+            register.extract_verification_code("Kind regards, The ProxyScrape team.")
+        )
+
+    def test_empty_returns_none(self):
+        self.assertIsNone(register.extract_verification_code(""))
+        self.assertIsNone(register.extract_verification_code(None))
+
+    def test_fallback_mixed_token(self):
+        # 短语全落空时，兜底找「字母+数字混合、8-16 位」的独立 token
+        text = "Please use the token below to finish. 77f3ab19cd02 thanks"
+        self.assertEqual(register.extract_verification_code(text), "77f3ab19cd02")
+
+    def test_fallback_skips_plain_words_and_urls(self):
+        # 纯字母单词 / 纯数字 / 长串 URL 都不应被兜底误抓
+        text = "visit https://dashboard.proxyscrape.com/v2/v4/account for help"
+        self.assertIsNone(register.extract_verification_code(text))
+
+
 class MailProviderTests(unittest.TestCase):
     def test_yunxin_create_mailbox(self):
         response = Mock()
