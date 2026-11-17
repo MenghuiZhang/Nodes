@@ -284,14 +284,16 @@ def extract_verification_code(text, fallback=True):
     1) 短语模式按序匹配（verification code / your code / code is / 验证码…）
     2) 兜底启发式：找独立 token，长度 8-16、同时含字母和数字——
        排除纯字母单词、纯数字、URL 片段与日期，避免误抓
-    返回 None 表示没匹配到（调用方负责记录诊断日志）。"""
+    返回 None 表示没匹配到（调用方负责记录诊断日志）。
+    注意：新邮件模板用 CSS text-transform:uppercase 把码显示成大写，
+    但服务端校验的是原始小写码——这里统一按小写返回。"""
     plain = _strip_html_to_text(text)
     if not plain:
         return None
     for phrase in _CODE_PHRASE_RES:
         mo = re.search(phrase + r"\s*[:：]?\s*([A-Za-z0-9]{6,16})", plain, re.I)
         if mo:
-            return mo.group(1)
+            return mo.group(1).lower()
     if not fallback:
         return None
     for token in re.findall(r"[A-Za-z0-9]+", plain):
@@ -302,7 +304,7 @@ def extract_verification_code(text, fallback=True):
         if token.lower() in {"proxy", "proxyscrape", "verification", "premium", "datacenter"}:
             continue
         log(f"[?] 短语未命中，兜底提取验证码: {token}")
-        return token
+        return token.lower()
     return None
 
 

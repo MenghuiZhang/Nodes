@@ -8,8 +8,8 @@ class ExtractCodeTests(unittest.TestCase):
     """验证码提取：覆盖新旧邮件模板与异常样例。"""
 
     def test_new_template_your_code(self):
-        # 2026-11 改版后的真实邮件正文
-        text = ("VERIFY YOUR EMAIL Your code: 543337bd33 "
+        # 2026-11 改版后的真实邮件正文（CSS 大写显示，真码小写）
+        text = ("VERIFY YOUR EMAIL Your code: 543337BD33 "
                 "Enter this code to verify your email address.")
         self.assertEqual(register.extract_verification_code(text), "543337bd33")
 
