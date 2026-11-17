@@ -886,7 +886,7 @@ def solve_turnstile_browser(headless=True, timeout=180):
         except Exception as exc:
             log(f"[!] attachShadow 钩子注入失败: {exc}")
         try:
-            _solve_turnstile_on_page(page, deadline)
+            return _solve_turnstile_on_page(page, deadline)
         except BaseException:
             # 兜底：任何未预期的异常路径都留一张现场截图（已知路径已各自截图）
             _shot(page, "error-exception")
@@ -1073,12 +1073,17 @@ def solve_turnstile(headless=False, timeout=None):
 
 # ── 注册（协议）─────────────────────────────────────────
 def register(email, password, turnstile_token):
+    # requests 的 data=dict 会静默丢弃 None 值字段——token 为空必须当场报错，
+    # 否则服务端只会报 "No Cloudflare Turnstile token provided" 掩盖真实问题。
+    token = str(turnstile_token or "").strip()
+    if len(token) < 80:
+        raise RuntimeError(f"Turnstile token 无效（len={len(token)}），拒绝提交注册")
     s = requests.Session()
     s.headers.update(HEADERS)
     r = s.post(PS_REGISTER, data={
         "email": email,
         "password": password,
-        "cf_turnstile_token": turnstile_token,
+        "cf_turnstile_token": token,
     }, timeout=30)
     try:
         response_log = dict(r.json())
